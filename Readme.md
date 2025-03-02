@@ -4,7 +4,7 @@
 首先需要安装必要的Python依赖：
 
 ```bash
-pip install torch numpy librosa soundfile pandas tqdm sklearn transformers sounddevice
+pip install -r requirements.txt
 ```
 
 ### 2. 准备数据集
