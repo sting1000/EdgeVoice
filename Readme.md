@@ -58,12 +58,44 @@ python train.py --annotation_file data/annotations.csv --model_type precise --ep
 
 使用训练好的模型运行演示程序:
 
+#### 5.1 实时麦克风模式
+
+使用麦克风进行实时语音识别（需要麦克风设备）:
+
 ```bash
 python demo.py --fast_model saved_models/fast_intent_model.pth --precise_model saved_models/precise_intent_model.pth
 ```
 
+#### 5.2 音频文件模式
+
+在没有麦克风或服务器环境下，可以使用音频文件进行演示:
+
+```bash
+python demo.py --fast_model saved_models/fast_intent_model.pth --precise_model saved_models/precise_intent_model.pth --use_file --file_path data/samples/take_photo.wav
+```
+
+#### 5.3 批处理模式
+
+批量处理目录中的所有音频文件:
+
+```bash
+python demo.py --fast_model saved_models/fast_intent_model.pth --precise_model saved_models/precise_intent_model.pth --batch_mode --file_path data/samples/
+```
+
+命令行参数说明:
+- `--fast_model`: 指定一级快速分类器模型路径（必需）
+- `--precise_model`: 指定二级精确分类器模型路径（可选）
+- `--use_file`: 使用音频文件代替麦克风输入
+- `--file_path`: 指定音频文件或目录的路径
+- `--batch_mode`: 启用批处理模式，处理指定目录中的所有音频文件
+
 演示程序会:
-1. 启动音频流，持续捕获麦克风输入
-2. 等待用户输入"wake"来模拟唤醒词检测
-3. 当唤醒词被检测到后，处理最近的音频并识别意图
-4. 显示识别结果，包括意图类型、置信度和处理时间
+1. **实时模式**：启动音频流，持续捕获麦克风输入，等待用户输入"wake"来模拟唤醒词检测
+2. **文件模式**：直接处理指定的音频文件并显示识别结果
+3. **批处理模式**：处理指定目录中的所有音频文件（支持.wav, .mp3, .flac, .ogg格式）
+
+识别结果包括:
+- 意图类型
+- 置信度
+- 处理路径（快速/精确分类器）
+- 处理时间

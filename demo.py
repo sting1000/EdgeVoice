@@ -6,6 +6,8 @@ import queue
 import threading  
 import time  
 import sys  
+import os
+import soundfile as sf  
 from inference import IntentInferenceEngine  
 from config import *  
 
@@ -17,6 +19,7 @@ class AudioStreamer:
         self.audio_buffer = np.zeros(buffer_size, dtype=np.float32)  
         self.is_active = False  
         self.stream = None  
+        self.file_mode = False
         
     def callback(self, indata, frames, time, status):  
         """音频流回调函数"""  
@@ -46,26 +49,71 @@ class AudioStreamer:
         """获取当前缓冲区中的音频"""  
         return self.audio_buffer.copy()  
     
-    def start(self):  
-        """启动音频流"""  
-        self.is_active = True  
+    def load_from_file(self, file_path):
+        """从音频文件加载数据"""
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"音频文件未找到: {file_path}")
+            
+        try:
+            print(f"正在从文件加载音频: {file_path}")
+            audio_data, file_sample_rate = sf.read(file_path)
+            
+            # 处理多声道情况，转换为单声道
+            if len(audio_data.shape) > 1:
+                audio_data = np.mean(audio_data, axis=1)
+                
+            # 如果采样率不匹配，打印警告（实际应用中可以考虑重采样）
+            if file_sample_rate != self.sample_rate:
+                print(f"警告: 文件采样率 ({file_sample_rate}Hz) 与系统设置 ({self.sample_rate}Hz) 不匹配")
+            
+            # 调整数据类型为float32
+            if audio_data.dtype != np.float32:
+                audio_data = audio_data.astype(np.float32)
+                
+            # 处理长度 - 如果长于缓冲区则截断，如果短于缓冲区则填充
+            if len(audio_data) > self.buffer_size:
+                self.audio_buffer = audio_data[-self.buffer_size:]
+            else:
+                # 放置在缓冲区末尾
+                self.audio_buffer = np.zeros(self.buffer_size, dtype=np.float32)
+                self.audio_buffer[-len(audio_data):] = audio_data
+                
+            print(f"音频文件加载成功，长度: {len(audio_data)} 采样点")
+            return True
+            
+        except Exception as e:
+            print(f"加载音频文件时出错: {e}")
+            return False
+    
+    def start(self, file_path=None):  
+        """启动音频流或加载文件"""  
+        self.is_active = True
         
-        # 启动更新缓冲区的线程  
-        self.buffer_thread = threading.Thread(target=self.update_buffer)  
-        self.buffer_thread.daemon = True  
-        self.buffer_thread.start()  
-        
-        # 启动音频流  
-        self.stream = sd.InputStream(  
-            samplerate=self.sample_rate,  
-            channels=1,  
-            callback=self.callback  
-        )  
-        self.stream.start()  
+        if file_path:
+            # 文件模式
+            self.file_mode = True
+            return self.load_from_file(file_path)
+        else:
+            # 麦克风流模式
+            self.file_mode = False
+            
+            # 启动更新缓冲区的线程  
+            self.buffer_thread = threading.Thread(target=self.update_buffer)  
+            self.buffer_thread.daemon = True  
+            self.buffer_thread.start()  
+            
+            # 启动音频流  
+            self.stream = sd.InputStream(  
+                samplerate=self.sample_rate,  
+                channels=1,  
+                callback=self.callback  
+            )  
+            self.stream.start()
+            return True
     
     def stop(self):  
         """停止音频流"""  
-        if self.is_active:  
+        if self.is_active and not self.file_mode:  
             self.is_active = False  
             
             if self.stream:  
@@ -134,42 +182,125 @@ class IntentDemo:
             
             time.sleep(0.1)  
     
-    def run(self):  
+    def process_file(self, file_path):
+        """处理单个音频文件"""
+        print(f"正在处理文件: {file_path}")
+        
+        # 加载音频文件
+        if not self.audio_streamer.start(file_path):
+            print("文件加载失败，跳过处理")
+            return False
+        
+        # 获取音频数据
+        audio = self.audio_streamer.get_audio()
+        
+        # 预测意图
+        print("正在处理音频...")
+        start_time = time.time()
+        result = self.engine.process_audio_stream(audio)
+        
+        # 输出结果
+        intent = result['intent']
+        confidence = result['confidence']
+        path = result['path']
+        total_time = result['times']['total']
+        
+        print(f"\n文件: {os.path.basename(file_path)}")
+        print(f"检测到意图: {intent}")
+        print(f"置信度: {confidence:.4f}")
+        print(f"使用路径: {path}")
+        print(f"处理时间: {total_time*1000:.2f}ms")
+        print(f"总处理时间: {(time.time() - start_time)*1000:.2f}ms")
+        
+        return True
+    
+    def batch_process(self, directory):
+        """批量处理目录中的所有音频文件"""
+        if not os.path.isdir(directory):
+            print(f"错误: '{directory}' 不是有效目录")
+            return
+        
+        # 支持的音频格式
+        audio_extensions = ['.wav', '.mp3', '.flac', '.ogg']
+        
+        # 查找目录中的所有音频文件
+        audio_files = []
+        for root, _, files in os.walk(directory):
+            for file in files:
+                if any(file.lower().endswith(ext) for ext in audio_extensions):
+                    audio_files.append(os.path.join(root, file))
+        
+        if not audio_files:
+            print(f"在 '{directory}' 中没有找到音频文件")
+            return
+        
+        print(f"找到 {len(audio_files)} 个音频文件进行处理")
+        
+        # 处理每个文件
+        success_count = 0
+        for i, file_path in enumerate(audio_files, 1):
+            print(f"\n[{i}/{len(audio_files)}] 处理文件: {file_path}")
+            if self.process_file(file_path):
+                success_count += 1
+        
+        print(f"\n批处理完成: 成功处理 {success_count}/{len(audio_files)} 个文件")
+    
+    def run(self, use_file=False, file_path=None, batch_mode=False):  
         """运行演示"""  
         self.running = True  
         
-        # 启动音频流  
-        print("启动音频流...")  
-        self.audio_streamer.start()  
+        if use_file:
+            if batch_mode:
+                # 批处理模式
+                print(f"开始批处理目录: {file_path}")
+                self.batch_process(file_path)
+            else:
+                # 单文件模式
+                self.process_file(file_path)
+        else:
+            # 实时麦克风模式
+            print("启动音频流...")  
+            self.audio_streamer.start()  
+            
+            try:  
+                # 启动唤醒词检测线程  
+                wakeword_thread = threading.Thread(target=self.simulate_wakeword_detection)  
+                wakeword_thread.daemon = True  
+                wakeword_thread.start()  
+                
+                # 启动意图处理  
+                self.process_intent()  
+                
+            except KeyboardInterrupt:  
+                print("\n用户中断，正在关闭...")  
+            finally:  
+                # 清理资源  
+                self.running = False  
+                self.audio_streamer.stop()  
+                
+                # 等待线程结束  
+                if 'wakeword_thread' in locals() and wakeword_thread.is_alive():  
+                    wakeword_thread.join(timeout=1.0)  
         
-        try:  
-            # 启动唤醒词检测线程  
-            wakeword_thread = threading.Thread(target=self.simulate_wakeword_detection)  
-            wakeword_thread.daemon = True  
-            wakeword_thread.start()  
-            
-            # 启动意图处理  
-            self.process_intent()  
-            
-        except KeyboardInterrupt:  
-            print("\n用户中断，正在关闭...")  
-        finally:  
-            # 清理资源  
-            self.running = False  
-            self.audio_streamer.stop()  
-            
-            # 等待线程结束  
-            if wakeword_thread.is_alive():  
-                wakeword_thread.join(timeout=1.0)  
-            
-            print("演示已结束")  
+        print("演示已结束")  
 
 if __name__ == "__main__":  
     parser = argparse.ArgumentParser(description='语音意图识别演示')  
     parser.add_argument('--fast_model', type=str, required=True, help='一级快速分类器路径')  
     parser.add_argument('--precise_model', type=str, help='二级精确分类器路径(可选)')  
+    parser.add_argument('--use_file', action='store_true', help='使用音频文件代替麦克风')
+    parser.add_argument('--file_path', type=str, help='音频文件或目录路径')
+    parser.add_argument('--batch_mode', action='store_true', help='批处理模式，处理目录中的所有音频文件')
     args = parser.parse_args()  
+    
+    # 如果指定了使用文件但未提供文件路径
+    if args.use_file and not args.file_path:
+        parser.error("使用--use_file时必须指定--file_path")
+    
+    # 如果指定了批处理模式但未提供目录
+    if args.batch_mode and not args.file_path:
+        parser.error("使用--batch_mode时必须指定--file_path为有效目录")
     
     # 创建并运行演示  
     demo = IntentDemo(args.fast_model, args.precise_model)  
-    demo.run()
+    demo.run(use_file=args.use_file, file_path=args.file_path, batch_mode=args.batch_mode)
