@@ -11,6 +11,7 @@ scikit-learn>=1.0.0
 tqdm>=4.62.0
 matplotlib>=3.5.0  # 用于可视化（如果需要）
 pytest>=6.2.5  # 用于测试
+openpyxl>=3.0.9  # 用于Excel文件生成
 
 # 可选依赖
 tensorboard>=2.8.0  # 用于训练可视化

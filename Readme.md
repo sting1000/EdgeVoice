@@ -99,3 +99,45 @@ python demo.py --fast_model saved_models/fast_intent_model.pth --precise_model s
 - 置信度
 - 处理路径（快速/精确分类器）
 - 处理时间
+
+### 6. 模型评估
+
+系统提供了评估脚本，可以对训练好的模型进行性能评估，并生成详细的指标报告：
+
+```bash
+python evaluate.py --annotation_file data/test_annotations.csv --fast_model saved_models/fast_intent_model.pth --precise_model saved_models/precise_intent_model.pth
+```
+
+评估脚本会：
+1. 分别评估fast模型和precise模型的性能
+2. 评估完整推理流程的性能（两个模型协同工作）
+3. 生成包含以下内容的Excel报告：
+   - 总体性能指标（准确率、精确率、召回率、F1分数、推理时间）
+   - 每个意图类别的详细指标
+   - 推理时间分布数据
+4. 生成可视化图表：
+   - 模型准确率比较图
+   - 平均推理时间比较图
+   - 各模型推理时间分布直方图
+
+#### 参数说明
+
+- `--annotation_file`: 测试数据集的注释文件路径（必需）
+- `--fast_model`: 一级快速分类器模型路径（必需）
+- `--precise_model`: 二级精确分类器模型路径（可选）
+- `--data_dir`: 数据目录，默认为config.py中的DATA_DIR
+- `--output_dir`: 评估结果输出目录，默认为"evaluation_results"
+
+#### 仅评估快速模型
+
+如果只想评估快速模型的性能，可以省略`--precise_model`参数：
+
+```bash
+python evaluate.py --annotation_file data/test_annotations.csv --fast_model saved_models/fast_intent_model.pth
+```
+
+#### 评估结果
+
+评估结果将保存在`output_dir`指定的目录中，包括：
+- Excel报告文件（包含多个工作表）
+- 可视化图表（PNG格式）
