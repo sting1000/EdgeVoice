@@ -62,8 +62,15 @@ class AudioIntentDataset(Dataset):
         self.feature_extractor = FeatureExtractor() if transform else None  
         
         # 对于精确模式，初始化分词器  
-        if mode == 'precise':  
-            self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')  
+        if mode == 'precise':
+            try:
+                # 先尝试从本地路径加载
+                self.tokenizer = DistilBertTokenizer.from_pretrained(DISTILBERT_MODEL_PATH)
+                print(f"已从本地路径加载DistilBERT分词器: {DISTILBERT_MODEL_PATH}")
+            except Exception as e:
+                print(f"无法从本地加载分词器，错误: {e}")
+                print("尝试从在线资源加载分词器...")
+                self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
         
     def __len__(self):  
         return len(self.annotations)  

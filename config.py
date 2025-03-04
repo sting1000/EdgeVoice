@@ -1,5 +1,6 @@
 # config.py  
 import os  
+import torch
 
 # 音频参数  
 SAMPLE_RATE = 48000  
@@ -29,6 +30,9 @@ INTENT_CLASSES = ["CAPTURE_AND_DESCRIBE", "CAPTURE_AND_REMEMBER",
                   "CAPTURE_SCAN_QR", "TAKE_PHOTO", "START_RECORDING",   
                   "STOP_RECORDING", "GET_BATTERY_LEVEL", "OTHERS"]  
 FAST_CONFIDENCE_THRESHOLD = 0.9  
+
+# DistilBERT模型本地路径
+DISTILBERT_MODEL_PATH = os.path.join("models", "distilbert-base-uncased")
 
 # 训练参数  
 BATCH_SIZE = 32  

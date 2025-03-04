@@ -1,4 +1,3 @@
-
 ### 1. 环境准备
 
 首先需要安装必要的Python依赖：
@@ -7,7 +6,30 @@
 pip install -r requirements.txt
 ```
 
-### 2. 准备数据集
+### 2. 准备DistilBERT模型
+
+由于系统使用了DistilBERT模型进行文本处理，需要提前下载模型文件到本地：
+
+```bash
+# 创建模型目录
+mkdir -p models/distilbert-base-uncased
+
+# 从Hugging Face下载模型文件（需要互联网连接）
+# 方法1：使用transformers库下载后复制
+python -c "from transformers import DistilBertTokenizer, DistilBertModel; tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased', cache_dir='./tmp'); model = DistilBertModel.from_pretrained('distilbert-base-uncased', cache_dir='./tmp')"
+
+# 复制下载的模型文件到项目目录
+cp -r ./tmp/models--distilbert-base-uncased/* ./models/distilbert-base-uncased/
+
+# 或者方法2：手动从Hugging Face网站下载
+# 访问 https://huggingface.co/distilbert-base-uncased/tree/main
+# 下载所有必要文件（config.json, vocab.txt, pytorch_model.bin等）
+# 保存到 models/distilbert-base-uncased/ 目录
+```
+
+系统会优先使用本地模型文件，如果本地文件不存在，则会尝试从在线资源获取。
+
+### 3. 准备数据集
 
 创建一个CSV格式的注释文件，包含以下列：
 - `file_path`: 音频文件相对路径
@@ -16,7 +38,7 @@ pip install -r requirements.txt
 
 将音频文件放置在`data`目录下，按照注释文件中的路径组织。
 
-### 3. 训练模型
+### 4. 训练模型
 
 #### 训练一级快速分类器:
 
@@ -32,7 +54,7 @@ python train.py --annotation_file data/annotations.csv --model_type precise --ep
 
 这将在`saved_models`目录中保存训练好的模型。
 
-### 4. 执行演示
+### 5. 执行演示
 
 使用训练好的模型运行演示程序:
 

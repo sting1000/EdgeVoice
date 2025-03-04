@@ -35,7 +35,14 @@ class IntentInferenceEngine:
         if precise_model_path:  
             print("加载二级精确分类器...")  
             self.precise_model = self._load_precise_model(precise_model_path)  
-            self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')  
+            try:
+                # 先尝试从本地路径加载
+                self.tokenizer = DistilBertTokenizer.from_pretrained(DISTILBERT_MODEL_PATH)
+                print(f"已从本地路径加载DistilBERT分词器: {DISTILBERT_MODEL_PATH}")
+            except Exception as e:
+                print(f"无法从本地加载分词器，错误: {e}")
+                print("尝试从在线资源加载分词器...")
+                self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
         
         # 类别名称  
         self.intent_classes = INTENT_CLASSES  

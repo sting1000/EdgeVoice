@@ -4,10 +4,11 @@ import torch.nn as nn
 import torch.nn.functional as F  
 from transformers import DistilBertModel, DistilBertConfig  
 from config import *  
+import os
 
 class PreciseIntentClassifier(nn.Module):  
     def __init__(self, hidden_size=PRECISE_MODEL_HIDDEN_SIZE,   
-                 num_classes=len(INTENT_CLASSES)):  
+                 num_classes=len(INTENT_CLASSES), pretrained_path=None):  
         super(PreciseIntentClassifier, self).__init__()  
         
         # 轻量级Transformer配置  
@@ -21,8 +22,25 @@ class PreciseIntentClassifier(nn.Module):
             max_position_embeddings=128,  # 减小位置嵌入的最大长度  
         )  
         
-        # 初始化轻量级Transformer模型  
-        self.transformer = DistilBertModel(self.config)  
+        # 初始化轻量级Transformer模型
+        if pretrained_path is None:
+            pretrained_path = DISTILBERT_MODEL_PATH
+            
+        try:
+            # 尝试从本地路径加载预训练模型
+            if os.path.exists(pretrained_path):
+                print(f"从本地路径加载DistilBERT模型: {pretrained_path}")
+                self.transformer = DistilBertModel.from_pretrained(
+                    pretrained_path,
+                    config=self.config
+                )
+            else:
+                print(f"本地路径 {pretrained_path} 不存在，使用配置初始化模型")
+                self.transformer = DistilBertModel(self.config)
+        except Exception as e:
+            print(f"从本地加载模型失败，错误: {e}")
+            print("使用配置初始化模型")
+            self.transformer = DistilBertModel(self.config)
         
         # 分类头  
         self.dropout = nn.Dropout(0.1)  
