@@ -127,6 +127,7 @@ python evaluate.py --annotation_file data/test_annotations.csv --fast_model save
 - `--precise_model`: 二级精确分类器模型路径（可选）
 - `--data_dir`: 数据目录，默认为config.py中的DATA_DIR
 - `--output_dir`: 评估结果输出目录，默认为"evaluation_results"
+- `--analyze_length`: 开启音频长度对模型性能的影响分析
 
 #### 仅评估快速模型
 
@@ -141,3 +142,50 @@ python evaluate.py --annotation_file data/test_annotations.csv --fast_model save
 评估结果将保存在`output_dir`指定的目录中，包括：
 - Excel报告文件（包含多个工作表）
 - 可视化图表（PNG格式）
+
+### 7. 音频长度处理
+
+系统对不同长度的音频文件进行了专门处理，确保在训练和评估阶段都能正确处理各种长度的音频：
+
+#### 7.1 音频长度标准化
+
+系统实现了音频长度标准化，以解决不同长度音频文件在处理过程中可能出现的问题：
+
+1. **过长音频处理**：
+   - 使用语音活动检测(VAD)找到最关键的语音段
+   - 优先保留语音段的中间部分
+   - 避免简单截断导致的信息丢失
+
+2. **过短音频处理**：
+   - 对过短音频进行居中填充
+   - 确保音频有足够的上下文信息
+
+3. **标准化方法**：
+   ```bash
+   # 音频长度标准化函数
+   standardize_audio_length(audio, sample_rate, target_length=5.0, min_length=0.5)
+   ```
+
+#### 7.2 音频长度对性能的影响分析
+
+使用 `--analyze_length` 参数可以分析音频长度对模型性能的影响：
+
+```bash
+python evaluate.py --annotation_file data/test_annotations.csv --fast_model saved_models/fast_intent_model.pth --analyze_length
+```
+
+分析结果将包括：
+- 不同长度组（短、中、长、超长）的性能指标
+- 长度对准确率的影响图表
+- 长度对推理时间的影响图表
+- 详细的Excel分析报告
+
+这些分析有助于理解模型在处理不同长度音频时的行为，并可以指导模型优化和数据收集策略。
+
+#### 7.3 训练阶段处理
+
+在训练阶段，系统会自动:
+- 统计数据集中的音频长度分布情况
+- 标准化音频长度，确保数据质量
+- 处理异常情况，如过长或过短的样本
+- 记录警告信息，帮助识别潜在问题

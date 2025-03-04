@@ -10,6 +10,7 @@ import os
 import soundfile as sf  
 from inference import IntentInferenceEngine  
 from config import *  
+import librosa
 
 class AudioStreamer:  
     def __init__(self, sample_rate=SAMPLE_RATE, buffer_size=MAX_COMMAND_DURATION_S*SAMPLE_RATE):  
@@ -62,23 +63,62 @@ class AudioStreamer:
             if len(audio_data.shape) > 1:
                 audio_data = np.mean(audio_data, axis=1)
                 
-            # 如果采样率不匹配，打印警告（实际应用中可以考虑重采样）
+            # 如果采样率不匹配，进行重采样
             if file_sample_rate != self.sample_rate:
-                print(f"警告: 文件采样率 ({file_sample_rate}Hz) 与系统设置 ({self.sample_rate}Hz) 不匹配")
+                print(f"警告: 文件采样率 ({file_sample_rate}Hz) 与系统设置 ({self.sample_rate}Hz) 不匹配，进行重采样")
+                # 使用librosa进行重采样
+                audio_data = librosa.resample(audio_data, orig_sr=file_sample_rate, target_sr=self.sample_rate)
             
             # 调整数据类型为float32
             if audio_data.dtype != np.float32:
                 audio_data = audio_data.astype(np.float32)
+            
+            # 添加音频长度验证
+            audio_duration = len(audio_data) / self.sample_rate
+            if audio_duration > MAX_COMMAND_DURATION_S:
+                print(f"警告: 音频长度 ({audio_duration:.2f}s) 超过最大命令长度 ({MAX_COMMAND_DURATION_S}s)")
+            elif audio_duration < 0.5:  # 小于0.5秒的音频可能太短
+                print(f"警告: 音频过短 ({audio_duration:.2f}s)，可能不足以包含完整命令")
+            
+            # 使用音频预处理器获取有效语音段
+            from audio_preprocessing import AudioPreprocessor
+            preprocessor = AudioPreprocessor(sample_rate=self.sample_rate)
+            
+            # 检测语音活动区域
+            speech_segments = preprocessor.detect_voice_activity(audio_data)
+            
+            if speech_segments:
+                # 如果检测到语音段，合并所有语音段
+                processed_audio = np.array([])
+                for start, end in speech_segments:
+                    # 转换帧索引到样本索引
+                    frame_shift = int(FRAME_SHIFT_MS * self.sample_rate / 1000)
+                    frame_length = int(FRAME_LENGTH_MS * self.sample_rate / 1000)
+                    sample_start = start * frame_shift
+                    sample_end = min(end * frame_shift + frame_length, len(audio_data))
+                    processed_audio = np.append(processed_audio, audio_data[sample_start:sample_end])
                 
-            # 处理长度 - 如果长于缓冲区则截断，如果短于缓冲区则填充
-            if len(audio_data) > self.buffer_size:
-                self.audio_buffer = audio_data[-self.buffer_size:]
+                print(f"检测到语音段，长度从 {len(audio_data)} 减少到 {len(processed_audio)} 采样点")
+                audio_data = processed_audio
             else:
-                # 放置在缓冲区末尾
+                print("未检测到明显的语音段，使用原始音频")
+            
+            # 智能处理音频长度
+            if len(audio_data) > self.buffer_size:
+                # 如果音频仍然太长，优先保留中间部分
+                # 这样比简单截取末尾更合理，因为语音命令通常在中间部分
+                start = (len(audio_data) - self.buffer_size) // 2
+                self.audio_buffer = audio_data[start:start+self.buffer_size]
+                print(f"音频超出缓冲区大小，截取中间 {self.buffer_size} 采样点")
+            else:
+                # 居中放置音频，而不是放在末尾
+                # 这对于特征提取和VAD更为合理
                 self.audio_buffer = np.zeros(self.buffer_size, dtype=np.float32)
-                self.audio_buffer[-len(audio_data):] = audio_data
-                
-            print(f"音频文件加载成功，长度: {len(audio_data)} 采样点")
+                start_pos = (self.buffer_size - len(audio_data)) // 2
+                self.audio_buffer[start_pos:start_pos+len(audio_data)] = audio_data
+                print(f"音频小于缓冲区大小，居中放置")
+            
+            print(f"音频文件加载成功，原始长度: {len(audio_data)} 采样点，持续时间: {audio_duration:.2f}s")
             return True
             
         except Exception as e:

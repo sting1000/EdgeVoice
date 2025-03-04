@@ -9,14 +9,15 @@ from tqdm import tqdm
 from sklearn.metrics import classification_report, accuracy_score, precision_recall_fscore_support, confusion_matrix
 import matplotlib.pyplot as plt
 from datetime import datetime
+import librosa
 
 from config import *
-from data_utils import prepare_dataloader
+from data_utils import prepare_dataloader, load_audio, standardize_audio_length
 from models.fast_classifier import FastIntentClassifier
 from models.precise_classifier import PreciseIntentClassifier
 from inference import IntentInferenceEngine
 
-def evaluate_models(data_dir, annotation_file, fast_model_path, precise_model_path=None, output_dir='evaluation_results'):
+def evaluate_models(data_dir, annotation_file, fast_model_path, precise_model_path=None, output_dir='evaluation_results', analyze_length_impact=False):
     """
     评估fast和precise模型的性能，并将结果输出到Excel文件中
     
@@ -26,6 +27,7 @@ def evaluate_models(data_dir, annotation_file, fast_model_path, precise_model_pa
         fast_model_path: 快速分类器模型路径
         precise_model_path: 精确分类器模型路径（可选）
         output_dir: 输出目录
+        analyze_length_impact: 是否分析音频长度对性能的影响
     """
     os.makedirs(output_dir, exist_ok=True)
     
@@ -34,7 +36,8 @@ def evaluate_models(data_dir, annotation_file, fast_model_path, precise_model_pa
     
     # 准备测试数据加载器
     print("准备测试数据...")
-    fast_loader = prepare_dataloader(data_dir, annotation_file, batch_size=32, mode='fast')
+    # 同时进行音频长度分析
+    fast_loader = prepare_dataloader(data_dir, annotation_file, batch_size=32, mode='fast', analyze_audio=True)
     
     # 如果有精确模型，也准备对应的数据加载器
     if precise_model_path:
@@ -109,6 +112,12 @@ def evaluate_models(data_dir, annotation_file, fast_model_path, precise_model_pa
         results['class_recalls'].append(model_results['class_recall'])
         results['class_f1s'].append(model_results['class_f1'])
     
+    # 4. 如果需要，分析音频长度对性能的影响
+    length_impact_results = None
+    if analyze_length_impact:
+        print("\n开始分析音频长度对性能的影响...")
+        length_impact_results = analyze_audio_length_impact(inference_engine, data_dir, annotation_file)
+    
     # 创建结果DataFrame
     df_summary = pd.DataFrame({
         '模型': results['model'],
@@ -153,11 +162,16 @@ def evaluate_models(data_dir, annotation_file, fast_model_path, precise_model_pa
                 '推理时间(ms)': inference_times
             })
             df_times.to_excel(writer, sheet_name=f'{model}_推理时间', index=False)
+        
+        # 如果有音频长度分析结果，添加到Excel中
+        if length_impact_results is not None:
+            df_length_impact = pd.DataFrame(length_impact_results)
+            df_length_impact.to_excel(writer, sheet_name='音频长度影响分析', index=False)
     
     print(f"\n评估结果已保存到: {excel_path}")
     
     # 可视化
-    generate_visualizations(results, output_dir, timestamp)
+    generate_visualizations(results, output_dir, timestamp, length_impact_results)
     
     return excel_path
 
@@ -408,7 +422,100 @@ def evaluate_full_pipeline(inference_engine, data_loader, confidence_threshold=F
         'class_f1': class_f1
     }
 
-def generate_visualizations(results, output_dir, timestamp):
+def analyze_audio_length_impact(inference_engine, data_dir, annotation_file):
+    """分析音频长度对模型性能的影响"""
+    print("加载数据集信息...")
+    # 读取注释文件
+    annotations = pd.read_csv(annotation_file)
+    
+    # 长度分组定义
+    length_bins = {
+        '短(<=1s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []},
+        '中(1-3s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []},
+        '长(3-5s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []},
+        '超长(>5s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []}
+    }
+    
+    # 获取类别到索引的映射
+    class_to_idx = {cls: i for i, cls in enumerate(INTENT_CLASSES)}
+    
+    print("分析不同长度的音频样本...")
+    # 遍历数据集
+    for idx in tqdm(range(len(annotations))):
+        try:
+            # 获取音频文件路径和标签
+            audio_path = os.path.join(data_dir, annotations.iloc[idx]['file_path'])
+            intent_label = annotations.iloc[idx]['intent']
+            label_idx = class_to_idx[intent_label]
+            
+            # 加载音频文件
+            audio, sr = load_audio(audio_path)
+            duration = len(audio) / sr
+            
+            # 决定音频属于哪个长度组
+            if duration <= 1.0:
+                group = '短(<=1s)'
+            elif duration <= 3.0:
+                group = '中(1-3s)'
+            elif duration <= 5.0:
+                group = '长(3-5s)'
+            else:
+                group = '超长(>5s)'
+            
+            # 预处理音频（可选，取决于是否想评估原始音频还是预处理后的音频）
+            audio = standardize_audio_length(audio, sr)
+            
+            # 提取特征并预测
+            start_time = time.time()
+            features = inference_engine.preprocessor.process(audio)
+            features = inference_engine.feature_extractor.extract_features(features)
+            features_tensor = torch.FloatTensor(features).unsqueeze(0).to(inference_engine.device)
+            
+            with torch.no_grad():
+                prediction, confidence = inference_engine.fast_model.predict(features_tensor)
+            
+            inference_time = time.time() - start_time
+            
+            # 记录结果
+            length_bins[group]['samples'].append(idx)
+            length_bins[group]['labels'].append(label_idx)
+            length_bins[group]['predictions'].append(prediction.item())
+            length_bins[group]['times'].append(inference_time)
+        
+        except Exception as e:
+            print(f"处理样本时出错 {idx}: {e}")
+    
+    # 计算每个长度组的性能指标
+    results = []
+    
+    for group, data in length_bins.items():
+        if len(data['samples']) > 0:
+            accuracy = accuracy_score(data['labels'], data['predictions'])
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                data['labels'], data['predictions'], average='macro'
+            )
+            avg_time = np.mean(data['times']) * 1000  # 转换为毫秒
+            
+            results.append({
+                '长度组': group,
+                '样本数量': len(data['samples']),
+                '准确率': accuracy,
+                '精确率(宏平均)': precision,
+                '召回率(宏平均)': recall,
+                'F1分数(宏平均)': f1,
+                '平均推理时间(ms)': avg_time
+            })
+            
+            print(f"\n{group} 组评估结果 (样本数: {len(data['samples'])}):")
+            print(f"准确率: {accuracy:.4f}")
+            print(f"精确率(宏平均): {precision:.4f}")
+            print(f"召回率(宏平均): {recall:.4f}")
+            print(f"F1分数(宏平均): {f1:.4f}")
+            print(f"平均推理时间: {avg_time:.2f}ms")
+    
+    return results
+
+def generate_visualizations(results, output_dir, timestamp, length_impact_results=None):
     """生成可视化图表"""
     # 1. 准确率比较柱状图
     plt.figure(figsize=(10, 6))
@@ -438,6 +545,42 @@ def generate_visualizations(results, output_dir, timestamp):
         plt.ylabel('频次')
         plt.grid(axis='y', linestyle='--', alpha=0.7)
         plt.savefig(os.path.join(output_dir, f'{model}_inference_time_hist_{timestamp}.png'))
+    
+    # 4. 音频长度影响分析图(如果有)
+    if length_impact_results:
+        plt.figure(figsize=(12, 8))
+        
+        # 准备数据
+        groups = [row['长度组'] for row in length_impact_results]
+        accuracies = [row['准确率'] for row in length_impact_results]
+        times = [row['平均推理时间(ms)'] for row in length_impact_results]
+        
+        # 双轴图：准确率和推理时间
+        fig, ax1 = plt.subplots(figsize=(12, 6))
+        
+        # 准确率柱状图
+        x = np.arange(len(groups))
+        width = 0.35
+        ax1.bar(x - width/2, accuracies, width, color='blue', label='准确率')
+        ax1.set_ylabel('准确率', color='blue')
+        ax1.tick_params(axis='y', labelcolor='blue')
+        ax1.set_ylim(0, 1)
+        
+        # 推理时间折线图
+        ax2 = ax1.twinx()
+        ax2.plot(x, times, 'ro-', linewidth=2, label='推理时间')
+        ax2.set_ylabel('推理时间 (ms)', color='red')
+        ax2.tick_params(axis='y', labelcolor='red')
+        
+        # 共享部分
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(groups)
+        ax1.set_title('音频长度对模型性能的影响')
+        ax1.legend(loc='upper left')
+        ax2.legend(loc='upper right')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'length_impact_analysis_{timestamp}.png'))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='评估语音意图识别模型')
@@ -446,6 +589,7 @@ if __name__ == "__main__":
     parser.add_argument('--fast_model', type=str, required=True, help='一级快速分类器路径')
     parser.add_argument('--precise_model', type=str, help='二级精确分类器路径(可选)')
     parser.add_argument('--output_dir', type=str, default='evaluation_results', help='输出目录')
+    parser.add_argument('--analyze_length', action='store_true', help='分析音频长度对性能的影响')
     args = parser.parse_args()
     
     # 评估模型并保存结果
@@ -454,5 +598,6 @@ if __name__ == "__main__":
         args.annotation_file,
         args.fast_model,
         args.precise_model,
-        args.output_dir
+        args.output_dir,
+        args.analyze_length
     ) 
