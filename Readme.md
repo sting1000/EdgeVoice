@@ -189,3 +189,79 @@ python evaluate.py --annotation_file data/test_annotations.csv --fast_model save
 - 标准化音频长度，确保数据质量
 - 处理异常情况，如过长或过短的样本
 - 记录警告信息，帮助识别潜在问题
+
+### 8. 数据增强
+
+为了改善小型数据集的训练效果，系统提供了全面的音频数据增强功能：
+
+#### 8.1 支持的增强方法
+
+系统实现了多种音频增强技术，特别适用于语音意图识别任务：
+
+- **音高变化**：改变音频的音调，模拟不同用户的声音特征
+- **时间伸缩**：调整音频的语速，保持音高不变
+- **音量调整**：改变音频的响度，模拟不同距离和环境条件
+- **噪声添加**：增加白噪声，提高模型对噪声的鲁棒性
+- **组合增强**：同时应用多种增强方法，创造更多样化的变体
+
+#### 8.2 离线数据增强
+
+离线方式可以预先生成增强数据并保存到磁盘：
+
+```bash
+# 基本用法
+python audio_augmentation.py --annotation_file data/annotations.csv --data_dir data --output_dir data_augmented
+
+# 高级选项
+python audio_augmentation.py --annotation_file data/annotations.csv \
+                            --data_dir data \
+                            --output_dir data_augmented \
+                            --augment_factor 5 \
+                            --visualize 10
+```
+
+#### 8.3 使用增强数据集训练
+
+使用`train_with_augmentation.py`脚本可以在训练过程中应用实时数据增强：
+
+```bash
+# 基本用法（默认启用增强）
+python train_with_augmentation.py --annotation_file data/annotations.csv --model_type fast
+
+# 高级选项
+python train_with_augmentation.py --annotation_file data/annotations.csv \
+                                 --model_type fast \
+                                 --epochs 30 \
+                                 --augment_prob 0.7 \
+                                 --batch_size 16
+```
+
+参数说明：
+- `--no_augment`：禁用数据增强（默认启用）
+- `--augment_prob`：数据增强概率，即每个样本被增强的概率，默认为0.5
+- `--no_cache`：禁用音频缓存（默认启用缓存以加速训练）
+
+其他参数与标准训练脚本相同。
+
+#### 8.4 增强参数调优建议
+
+针对语音意图识别任务，以下是推荐的增强参数设置：
+
+- **音高变化**：`n_steps_range=(-3, 3)`，避免过大变化导致不自然音色
+- **时间伸缩**：`rate_range=(0.8, 1.2)`，保持语音内容可理解
+- **音量调整**：`gain_range=(0.5, 1.5)`，模拟合理的音量变化
+- **噪声添加**：`noise_level_range=(0.001, 0.01)`，低强度噪声更接近真实场景
+
+对于不同类型的命令，可能需要特定调整：
+- 简短命令（如"拍照"）：使用较小的时间伸缩范围
+- 复杂指令：可以应用更强的音高变化和噪声增强
+
+#### 8.5 增强效果监控
+
+通过以下方式监控数据增强的效果：
+
+1. 比较有无增强的训练曲线（使用train_with_augmentation.py生成）
+2. 观察各意图类别的准确率变化
+3. 分析在不同环境条件下的泛化性能
+
+详细的数据增强功能说明请参考[README_augmentation.md](README_augmentation.md)文档。
