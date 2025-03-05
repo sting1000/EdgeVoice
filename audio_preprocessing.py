@@ -47,7 +47,7 @@ class AudioPreprocessor:
     def detect_voice_activity(self, audio):  
         """基于能量和过零率的VAD"""  
         frames = librosa.util.frame(audio, frame_length=self.frame_length,   
-                                   hop_length=self.frame_shift)  
+                                  hop_length=self.frame_shift)  
         
         # 计算每一帧的能量  
         energy = np.sum(frames**2, axis=0)  
@@ -55,12 +55,18 @@ class AudioPreprocessor:
         
         # 计算过零率  
         zcr = librosa.feature.zero_crossing_rate(audio,   
-                                               frame_length=self.frame_length,   
-                                               hop_length=self.frame_shift)[0]  
+                                              frame_length=self.frame_length,   
+                                              hop_length=self.frame_shift)[0]  
         zcr = zcr / np.max(zcr + 1e-10)  
+        
+        # 确保两个数组长度一致  
+        min_length = min(len(energy), len(zcr))  
+        energy = energy[:min_length]  
+        zcr = zcr[:min_length]  
         
         # 结合能量和过零率进行VAD  
         is_speech = (energy > self.vad_energy_threshold) | (zcr > self.vad_zcr_threshold)  
+        zcr = zcr / np.max(zcr + 1e-10)  
         
         # 应用最小语音/静音持续时间约束  
         speech_segments = []  

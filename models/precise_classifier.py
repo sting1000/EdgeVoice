@@ -32,7 +32,8 @@ class PreciseIntentClassifier(nn.Module):
                 print(f"从本地路径加载DistilBERT模型: {pretrained_path}")
                 self.transformer = DistilBertModel.from_pretrained(
                     pretrained_path,
-                    config=self.config
+                    config=self.config,
+                    ignore_mismatched_sizes=True
                 )
             else:
                 print(f"本地路径 {pretrained_path} 不存在，使用配置初始化模型")
