@@ -16,4 +16,10 @@ openpyxl>=3.0.9  # 用于Excel文件生成
 # 可选依赖
 tensorboard>=2.8.0  # 用于训练可视化
 onnx>=1.11.0  # 用于模型转换和优化（部署阶段）
-onnxruntime>=1.10.0  # 用于优化推理 
+onnxruntime>=1.10.0  # 用于优化推理
+
+# 数据采集工具依赖
+pyaudio>=0.2.12  # 用于音频录制
+tkinter  # 用于GUI界面（通常已随Python安装）
+seaborn>=0.11.2  # 用于数据可视化
+uuid>=1.30  # 用于生成唯一ID 
