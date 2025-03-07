@@ -202,7 +202,7 @@ class AudioRecorderApp:
             df = pd.DataFrame(columns=columns)
             
             # 保存到CSV
-            df.to_csv(ANNOTATION_FILE, index=False)
+            df.to_csv(ANNOTATION_FILE, index=False, encoding='utf-8')
             print(f"已创建注释文件: {ANNOTATION_FILE}")
     
     def update_prompt(self):
@@ -288,9 +288,9 @@ class AudioRecorderApp:
             }
             
             # 添加到注释文件
-            df = pd.read_csv(ANNOTATION_FILE)
+            df = pd.read_csv(ANNOTATION_FILE, encoding='utf-8')
             df = pd.concat([df, pd.DataFrame([data])], ignore_index=True)
-            df.to_csv(ANNOTATION_FILE, index=False)
+            df.to_csv(ANNOTATION_FILE, index=False, encoding='utf-8')
             
             # 更新会话计数
             self.session_recordings += 1
