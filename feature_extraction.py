@@ -62,10 +62,10 @@ class FeatureExtractor:
         
     def extract_features(self, audio):  
         """提取所有声学特征"""  
-        # 提取基础MFCC特征  
+        # 提取基础MFCC特征，不添加上下文
         mfcc_features = self.extract_mfcc(audio)  
         
-        # 添加上下文信息  
-        context_features = self.add_context(mfcc_features)  
+        # 为了与现有模型兼容，我们不再添加上下文信息
+        # 如果需要上下文特征，可以调用 add_context 方法
         
-        return context_features
+        return mfcc_features

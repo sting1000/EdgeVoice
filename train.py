@@ -74,27 +74,37 @@ def process_audio_for_precise(audio, sr, tokenizer, transcript=None):
     返回:
         特征字典，包含input_ids和attention_mask
     """
-    # 使用提供的文本转录或默认文本
-    if transcript is None or transcript == "":
-        # 在实际场景中，此处应调用ASR模型获取文本
-        text = "未提供转录文本"
-    else:
-        text = transcript
-    
-    # 使用分词器处理文本
-    encoding = tokenizer(
-        text,
-        padding='max_length',
-        truncation=True,
-        max_length=128,
-        return_tensors='pt'
-    )
-    
-    # 提取所需的特征
-    return {
-        'input_ids': encoding['input_ids'].squeeze(0),
-        'attention_mask': encoding['attention_mask'].squeeze(0)
-    }
+    try:
+        # 使用提供的文本转录或默认文本
+        if transcript is None or transcript == "":
+            # 在实际场景中，此处应调用ASR模型获取文本
+            text = "未提供转录文本"
+        else:
+            text = transcript
+        
+        # 使用分词器处理文本
+        encoding = tokenizer(
+            text,
+            padding='max_length',
+            truncation=True,
+            max_length=128,
+            return_tensors='pt'
+        )
+        
+        # 提取所需的特征并转换为numpy数组
+        # 注意：这里我们需要将PyTorch tensor转换为numpy数组
+        # 因为Dataset.__getitem__返回的数据会被collate_fn处理
+        return {
+            'input_ids': encoding['input_ids'].squeeze(0).numpy(),
+            'attention_mask': encoding['attention_mask'].squeeze(0).numpy()
+        }
+    except Exception as e:
+        print(f"文本特征提取错误: {e}")
+        # 返回安全的默认值
+        return {
+            'input_ids': np.zeros((128,), dtype=np.int64),
+            'attention_mask': np.zeros((128,), dtype=np.int64)
+        }
 
 def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_EPOCHS, 
                     augment=True, augment_prob=0.5, use_cache=True, seed=42):
@@ -292,10 +302,10 @@ def train_precise_model(data_dir, annotation_file, model_save_path, num_epochs=N
         
         for batch in progress_bar:
             # 准备数据（适配新的数据结构）
-            features = batch['features']
+            features = batch['features']  # 这里features是一个字典
             input_ids = features['input_ids'].to(device)  
             attention_mask = features['attention_mask'].to(device)  
-            labels = batch['label'].to(device)  # 修改为'label'，与augmented_dataset.py中的键名一致
+            labels = batch['label'].to(device)
             
             # 梯度清零  
             optimizer.zero_grad()  

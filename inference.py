@@ -9,6 +9,7 @@ from feature_extraction import FeatureExtractor
 from models.fast_classifier import FastIntentClassifier  
 from models.precise_classifier import PreciseIntentClassifier  
 from transformers import DistilBertTokenizer  
+import torch.nn.functional as F  
 
 class IntentInferenceEngine:  
     def __init__(self, fast_model_path, precise_model_path=None,   
@@ -49,8 +50,8 @@ class IntentInferenceEngine:
         
     def _load_fast_model(self, model_path):  
         """加载一级快速分类器模型"""  
-        # 注意：由于无法预知输入大小，这里使用一个占位值，实际使用时应调整  
-        input_size = 39 * (2 * CONTEXT_FRAMES + 1)  # 假设的特征维度(MFCC+Delta+Delta2)*上下文帧数  
+        # 修复特征维度不匹配的问题
+        input_size = 39  # 使用与训练模型匹配的特征维度(MFCC+Delta+Delta2)
         model = FastIntentClassifier(input_size=input_size)  
         model.load_state_dict(torch.load(model_path, map_location=self.device))  
         model = model.to(self.device)  
@@ -130,6 +131,58 @@ class IntentInferenceEngine:
         inference_time = time.time() - start_time  
         
         return intent_class, confidence, inference_time  
+    
+    def predict(self, features, confidence_threshold=None):
+        """
+        基于特征直接进行预测，支持快速分类器和精确分类器
+        
+        参数:
+            features: 特征，可以是张量（针对快速分类器）或字典（针对精确分类器）
+            confidence_threshold: 置信度阈值，如果为None则使用默认值
+            
+        返回:
+            (预测的类别索引, 置信度, 是否使用了快速分类器)
+        """
+        threshold = confidence_threshold if confidence_threshold is not None else self.fast_confidence_threshold
+        
+        try:
+            # 根据特征类型判断使用哪个分类器
+            if isinstance(features, torch.Tensor):
+                # 使用快速分类器
+                predicted_class, confidence = self.fast_model.predict(features)
+                intent_idx = predicted_class.item()
+                confidence_value = confidence.item()
+                
+                # 如果置信度高于阈值，直接返回结果
+                if confidence_value >= threshold:
+                    return intent_idx, confidence_value, True
+                
+                # 如果没有精确分类器，仍然返回快速分类器的结果
+                if self.precise_model is None:
+                    return intent_idx, confidence_value, True
+                    
+                # 否则将在下一步使用精确分类器
+                
+            elif isinstance(features, dict) and 'input_ids' in features and 'attention_mask' in features:
+                # 直接使用精确分类器
+                input_ids = features['input_ids']
+                attention_mask = features['attention_mask']
+                
+                outputs = self.precise_model(input_ids, attention_mask)
+                logits = outputs.logits
+                probs = F.softmax(logits, dim=1)
+                confidence, predicted = torch.max(probs, dim=1)
+                
+                return predicted.item(), confidence.item(), False
+                
+            else:
+                # 不支持的特征类型
+                print(f"不支持的特征类型: {type(features)}")
+                return 0, 0.0, True  # 返回默认值
+                
+        except Exception as e:
+            print(f"预测过程中出错: {str(e)}")
+            return 0, 0.0, True  # 出错时返回默认值
     
     def predict_intent(self, audio, audio_text=None):  
         """  

@@ -349,22 +349,50 @@ def collate_fn(batch):
     transcripts = []
     file_paths = []
     
+    # 检查特征类型（是否为字典）
+    is_dict_features = False
+    if batch and isinstance(batch[0]['features'], dict):
+        is_dict_features = True
+        # 针对字典类型的特征初始化
+        dict_features = {k: [] for k in batch[0]['features'].keys()}
+    
     for item in batch:
         audio.append(item['audio'])
-        features.append(item['features'])
+        
+        # 处理字典类型的特征（用于精确分类器）
+        if is_dict_features:
+            for k, v in item['features'].items():
+                dict_features[k].append(v)
+        else:
+            # 处理普通数组类型的特征（用于快速分类器）
+            features.append(item['features'])
+            
         intents.append(item['intent'])
         labels.append(item['label'])
         transcripts.append(item['transcript'])
         file_paths.append(item['file_path'])
     
-    return {
+    # 构建返回结果
+    result = {
         'audio': audio,
-        'features': torch.tensor(np.array(features), dtype=torch.float32),
         'intent': intents,
         'label': torch.tensor(labels, dtype=torch.long),
         'transcript': transcripts,
         'file_path': file_paths
     }
+    
+    # 根据特征类型添加到结果中
+    if is_dict_features:
+        # 对于字典类型特征，分别进行张量转换
+        result['features'] = {
+            k: torch.stack([torch.tensor(v_i) for v_i in v]) 
+            for k, v in dict_features.items()
+        }
+    else:
+        # 对于普通数组特征，直接转换为张量
+        result['features'] = torch.tensor(np.array(features), dtype=torch.float32)
+    
+    return result
 
 def prepare_augmented_dataloader(annotation_file, data_dir, feature_extractor=None, 
                                 batch_size=32, shuffle=True, augment=True, 
