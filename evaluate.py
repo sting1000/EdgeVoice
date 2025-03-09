@@ -21,44 +21,44 @@ from models.precise_classifier import PreciseIntentClassifier
 from inference import IntentInferenceEngine
 
 def evaluate_models(data_dir, annotation_file, fast_model_path, precise_model_path=None, output_dir='evaluation_results', analyze_length_impact=False):
-    """评估模型性能"""
+    """Evaluate model performance"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     os.makedirs(output_dir, exist_ok=True)
     
-    # 初始化推理引擎
+    # Initialize inference engine
     inference_engine = IntentInferenceEngine(
         fast_model_path=fast_model_path,
         precise_model_path=precise_model_path
     )
     
-    # 定义特征提取函数
+    # Define feature extraction function
     def fast_feature_extractor(audio, sr, **kwargs):
         audio = standardize_audio_length(audio, sr)
-        # 提取MFCC特征和动态特征
+        # Extract MFCC features and dynamic features
         mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
         delta_mfccs = librosa.feature.delta(mfccs)
         delta2_mfccs = librosa.feature.delta(mfccs, order=2)
         features = np.concatenate([mfccs, delta_mfccs, delta2_mfccs], axis=0)
-        return features.T  # (time, features)格式，不添加上下文
+        return features.T  # (time, features) format, without context
     
-    # 同时进行音频长度分析
+    # Also perform audio length analysis
     fast_loader, fast_labels = prepare_augmented_dataloader(
         annotation_file=annotation_file, 
         data_dir=data_dir, 
         feature_extractor=fast_feature_extractor,
         batch_size=32, 
-        augment=False,  # 评估时不使用增强
+        augment=False,  # No augmentation during evaluation
         shuffle=False
     )
     
     def precise_feature_extractor(audio, sr, transcript=None, **kwargs):
-        # 对于精确分类器，我们需要文本特征
-        # 在实际使用中，这里应该使用ASR获取文本
-        # 但在评估中，我们使用标注的文本
+        # For precise classifier, we need text features
+        # In actual use, we should use ASR to get text
+        # But in evaluation, we use annotated text
         if transcript is None:
-            transcript = "评估模式默认文本"
+            transcript = "Default text for evaluation mode"
             
-        # 使用tokenizer处理文本
+        # Use tokenizer to process text
         encoding = inference_engine.tokenizer(
             transcript,
             max_length=128,
@@ -72,7 +72,7 @@ def evaluate_models(data_dir, annotation_file, fast_model_path, precise_model_pa
             'attention_mask': encoding['attention_mask'].squeeze(0)
         }
     
-    # 准备精确分类器的数据加载器
+    # Prepare data loader for precise classifier
     if precise_model_path:
         precise_loader, precise_labels = prepare_augmented_dataloader(
             annotation_file=annotation_file, 
@@ -83,85 +83,85 @@ def evaluate_models(data_dir, annotation_file, fast_model_path, precise_model_pa
             shuffle=False
         )
     
-    print("准备测试数据...")
+    print("Preparing test data...")
     
-    # 存储评估结果
+    # Store evaluation results
     all_results = []
     
-    # 评估快速分类器
-    print("\n开始评估快速分类器...")
+    # Evaluate fast classifier
+    print("\nStarting fast classifier evaluation...")
     fast_results = evaluate_fast_model(inference_engine, fast_loader)
     all_results.append(fast_results)
     
-    # 打印快速分类器结果
-    print(f"\n快速分类器评估结果:")
-    print(f"准确率: {fast_results['accuracy']:.4f}")
-    print(f"精确率: {fast_results['precision']:.4f}")
-    print(f"召回率: {fast_results['recall']:.4f}")
-    print(f"F1分数: {fast_results['f1']:.4f}")
-    print(f"平均推理时间: {fast_results['avg_inference_time_ms']:.2f}ms")
-    print("\n分类报告:")
+    # Print fast classifier results
+    print(f"\nFast Classifier Evaluation Results:")
+    print(f"Accuracy: {fast_results['accuracy']:.4f}")
+    print(f"Precision: {fast_results['precision']:.4f}")
+    print(f"Recall: {fast_results['recall']:.4f}")
+    print(f"F1 Score: {fast_results['f1']:.4f}")
+    print(f"Average Inference Time: {fast_results['avg_inference_time_ms']:.2f}ms")
+    print("\nClassification Report:")
     print(fast_results['class_report'])
     
-    # 评估精确分类器(如果有)
+    # Evaluate precise classifier (if available)
     if precise_model_path:
-        print("\n开始评估精确分类器...")
+        print("\nStarting precise classifier evaluation...")
         precise_results = evaluate_precise_model(inference_engine, precise_loader)
         all_results.append(precise_results)
         
-        # 打印精确分类器结果
-        print(f"\n精确分类器评估结果:")
-        print(f"准确率: {precise_results['accuracy']:.4f}")
-        print(f"精确率: {precise_results['precision']:.4f}")
-        print(f"召回率: {precise_results['recall']:.4f}")
-        print(f"F1分数: {precise_results['f1']:.4f}")
-        print(f"平均推理时间: {precise_results['avg_inference_time_ms']:.2f}ms")
-        print("\n分类报告:")
+        # Print precise classifier results
+        print(f"\nPrecise Classifier Evaluation Results:")
+        print(f"Accuracy: {precise_results['accuracy']:.4f}")
+        print(f"Precision: {precise_results['precision']:.4f}")
+        print(f"Recall: {precise_results['recall']:.4f}")
+        print(f"F1 Score: {precise_results['f1']:.4f}")
+        print(f"Average Inference Time: {precise_results['avg_inference_time_ms']:.2f}ms")
+        print("\nClassification Report:")
         print(precise_results['class_report'])
         
-        # 评估完整流水线
-        print("\n开始评估完整推理流水线...")
+        # Evaluate full pipeline
+        print("\nStarting full inference pipeline evaluation...")
         pipeline_results = evaluate_full_pipeline(inference_engine, fast_loader)
         all_results.append(pipeline_results)
         
-        # 打印流水线结果
-        print(f"\n完整推理流水线评估结果:")
-        print(f"准确率: {pipeline_results['accuracy']:.4f}")
-        print(f"精确率: {pipeline_results['precision']:.4f}")
-        print(f"召回率: {pipeline_results['recall']:.4f}")
-        print(f"F1分数: {pipeline_results['f1']:.4f}")
-        print(f"平均推理时间: {pipeline_results['avg_inference_time_ms']:.2f}ms")
-        print(f"快速分类器使用率: {pipeline_results['fast_ratio']*100:.1f}%")
-        print("\n分类报告:")
+        # Print pipeline results
+        print(f"\nFull Inference Pipeline Evaluation Results:")
+        print(f"Accuracy: {pipeline_results['accuracy']:.4f}")
+        print(f"Precision: {pipeline_results['precision']:.4f}")
+        print(f"Recall: {pipeline_results['recall']:.4f}")
+        print(f"F1 Score: {pipeline_results['f1']:.4f}")
+        print(f"Average Inference Time: {pipeline_results['avg_inference_time_ms']:.2f}ms")
+        print(f"Fast Classifier Usage Rate: {pipeline_results['fast_ratio']*100:.1f}%")
+        print("\nClassification Report:")
         print(pipeline_results['class_report'])
     
-    # 分析音频长度对性能的影响
+    # Analyze impact of audio length on performance
     length_impact_results = None
     if analyze_length_impact:
-        print("\n分析音频长度对性能的影响...")
+        print("\nAnalyzing impact of audio length on performance...")
         length_impact_results = analyze_audio_length_impact(inference_engine, data_dir, annotation_file)
     
-    # 生成可视化
-    print("\n生成评估结果可视化...")
+    # Generate visualization
+    print("\nGenerating evaluation result visualizations...")
     generate_visualizations(all_results, output_dir, timestamp, length_impact_results)
     
-    print(f"\n评估完成。结果保存在 {output_dir} 目录。")
+    print(f"\nEvaluation complete. Results saved to {output_dir} directory.")
     
     return all_results, length_impact_results
 
 def evaluate_fast_model(inference_engine, data_loader):
-    """评估快速分类器模型的性能"""
+    """Evaluate fast classifier model performance"""
     all_predictions = []
     all_confidences = []
     all_labels = []
     all_inference_times = []
 
-    loop = tqdm(data_loader, desc="评估快速分类器")
+    loop = tqdm(data_loader, desc="Evaluating fast classifier")
     for batch_idx, batch in enumerate(loop):
         features, labels = batch['features'], batch['label']
         
         for feature, label in zip(features, labels):
-            # 单样本推理
+            # Single sample inference
             feature_np = feature.numpy() if not feature.is_cuda else feature.cpu().numpy()
             
             start_time = time.time()
@@ -171,20 +171,20 @@ def evaluate_fast_model(inference_engine, data_loader):
                 )
             inference_time = time.time() - start_time
             
-            # 收集结果
+            # Collect results
             all_predictions.append(predicted_class.item())
             all_confidences.append(confidence.item())
             all_labels.append(label.item() if torch.is_tensor(label) else label)
             all_inference_times.append(inference_time)
 
-    # 计算指标
+    # Calculate metrics
     accuracy = accuracy_score(all_labels, all_predictions)
     precision, recall, f1, _ = precision_recall_fscore_support(
         all_labels, all_predictions, average='weighted'
     )
-    avg_inference_time = np.mean(all_inference_times) * 1000  # 转换为毫秒
+    avg_inference_time = np.mean(all_inference_times) * 1000  # Convert to milliseconds
     
-    # 生成更详细的报告
+    # Generate more detailed report
     class_report = classification_report(
         all_labels, all_predictions, 
         target_names=INTENT_CLASSES, 
@@ -212,13 +212,13 @@ def evaluate_fast_model(inference_engine, data_loader):
     return results
 
 def evaluate_precise_model(inference_engine, data_loader):
-    """评估精确分类器模型的性能"""
+    """Evaluate precise classifier model performance"""
     all_predictions = []
     all_confidences = []
     all_labels = []
     all_inference_times = []
 
-    loop = tqdm(data_loader, desc="评估精确分类器")
+    loop = tqdm(data_loader, desc="Evaluating precise classifier")
     for batch_idx, batch in enumerate(loop):
         features = batch['features']
         labels = batch['label']
@@ -228,7 +228,7 @@ def evaluate_precise_model(inference_engine, data_loader):
             attention_mask = features['attention_mask'][i].unsqueeze(0).to(inference_engine.device)
             label = labels[i]
             
-            # 单样本推理
+            # Single sample inference
             start_time = time.time()
             with torch.no_grad():
                 outputs = inference_engine.precise_model(input_ids, attention_mask)
@@ -237,20 +237,20 @@ def evaluate_precise_model(inference_engine, data_loader):
                 confidence, predicted = torch.max(probs, dim=1)
             inference_time = time.time() - start_time
             
-            # 收集结果
+            # Collect results
             all_predictions.append(predicted.item())
             all_confidences.append(confidence.item())
             all_labels.append(label.item() if torch.is_tensor(label) else label)
             all_inference_times.append(inference_time)
 
-    # 计算指标
+    # Calculate metrics
     accuracy = accuracy_score(all_labels, all_predictions)
     precision, recall, f1, _ = precision_recall_fscore_support(
         all_labels, all_predictions, average='weighted'
     )
-    avg_inference_time = np.mean(all_inference_times) * 1000  # 转换为毫秒
+    avg_inference_time = np.mean(all_inference_times) * 1000  # Convert to milliseconds
     
-    # 生成更详细的报告
+    # Generate more detailed report
     class_report = classification_report(
         all_labels, all_predictions, 
         target_names=INTENT_CLASSES, 
@@ -278,33 +278,33 @@ def evaluate_precise_model(inference_engine, data_loader):
     return results
 
 def evaluate_full_pipeline(inference_engine, data_loader, confidence_threshold=FAST_CONFIDENCE_THRESHOLD):
-    """评估完整推理流水线的性能（一级快速+二级精确分类器）"""
+    """Evaluate full inference pipeline performance (first-level fast + second-level precise classifier)"""
     all_predictions = []
     all_confidences = []
     all_labels = []
     all_inference_times = []
-    all_is_fast = []  # 记录是否使用了快速分类器
+    all_is_fast = []  # Record whether fast classifier was used
 
-    # 使用传入的阈值覆盖引擎默认值
+    # Use passed threshold instead of engine default
     original_threshold = inference_engine.fast_confidence_threshold
     inference_engine.fast_confidence_threshold = confidence_threshold
     
-    loop = tqdm(data_loader, desc="评估完整流水线")
+    loop = tqdm(data_loader, desc="Evaluating full pipeline")
     for batch_idx, batch in enumerate(loop):
         features = batch['features']
         labels = batch['label']
         
         for i in range(len(labels)):
-            # 准备特征
+            # Prepare features
             if isinstance(features, torch.Tensor):
-                # 对于快速分类器的特征
+                # For fast classifier features
                 feature = features[i]
                 feature_np = feature.cpu().numpy() if feature.is_cuda else feature.numpy()
                 feature_tensor = torch.FloatTensor(feature_np).unsqueeze(0).to(inference_engine.device)
                 label = labels[i]
                 transcription = None
             elif isinstance(features, dict):
-                # 对于精确分类器的特征
+                # For precise classifier features
                 feature_tensor = {
                     'input_ids': features['input_ids'][i].unsqueeze(0).to(inference_engine.device),
                     'attention_mask': features['attention_mask'][i].unsqueeze(0).to(inference_engine.device)
@@ -312,35 +312,35 @@ def evaluate_full_pipeline(inference_engine, data_loader, confidence_threshold=F
                 label = labels[i]
                 transcription = batch.get('transcription', [None])[i]
             else:
-                print(f"不支持的特征类型: {type(features)}")
+                print(f"Unsupported feature type: {type(features)}")
                 continue
             
-            # 单样本推理
+            # Single sample inference
             start_time = time.time()
             with torch.no_grad():
-                # 使用predict方法直接处理特征
+                # Use predict method directly on features
                 predicted_class, confidence, is_fast = inference_engine.predict(feature_tensor)
             inference_time = time.time() - start_time
             
-            # 收集结果
+            # Collect results
             all_predictions.append(predicted_class)
             all_confidences.append(confidence)
             all_labels.append(label.item() if torch.is_tensor(label) else label)
             all_inference_times.append(inference_time)
             all_is_fast.append(is_fast)
 
-    # 恢复原始阈值
+    # Restore original threshold
     inference_engine.fast_confidence_threshold = original_threshold
     
-    # 计算指标
+    # Calculate metrics
     accuracy = accuracy_score(all_labels, all_predictions)
     precision, recall, f1, _ = precision_recall_fscore_support(
         all_labels, all_predictions, average='weighted'
     )
-    avg_inference_time = np.mean(all_inference_times) * 1000  # 转换为毫秒
+    avg_inference_time = np.mean(all_inference_times) * 1000  # Convert to milliseconds
     fast_ratio = sum(all_is_fast) / len(all_is_fast) if all_is_fast else 0
     
-    # 生成更详细的报告
+    # Generate more detailed report
     class_report = classification_report(
         all_labels, all_predictions, 
         target_names=INTENT_CLASSES, 
@@ -370,49 +370,49 @@ def evaluate_full_pipeline(inference_engine, data_loader, confidence_threshold=F
     return results
 
 def analyze_audio_length_impact(inference_engine, data_dir, annotation_file):
-    """分析音频长度对模型性能的影响"""
-    print("加载数据集信息...")
-    # 读取注释文件
+    """Analyze impact of audio length on model performance"""
+    print("Loading dataset information...")
+    # Read annotation file
     annotations = pd.read_csv(annotation_file)
     
-    # 长度分组定义
+    # Length grouping definition
     length_bins = {
-        '短(<=1s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []},
-        '中(1-3s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []},
-        '长(3-5s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []},
-        '超长(>5s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []}
+        'Short (<=1s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []},
+        'Medium (1-3s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []},
+        'Long (3-5s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []},
+        'Super Long (>5s)': {'samples': [], 'labels': [], 'predictions': [], 'times': []}
     }
     
-    # 获取类别到索引的映射
+    # Get class to index mapping
     class_to_idx = {cls: i for i, cls in enumerate(INTENT_CLASSES)}
     
-    print("分析不同长度的音频样本...")
-    # 遍历数据集
+    print("Analyzing different length audio samples...")
+    # Iterate over dataset
     for idx in tqdm(range(len(annotations))):
         try:
-            # 获取音频文件路径和标签
+            # Get audio file path and label
             audio_path = os.path.join(data_dir, annotations.iloc[idx]['file_path'])
             intent_label = annotations.iloc[idx]['intent']
             label_idx = class_to_idx[intent_label]
             
-            # 加载音频文件
+            # Load audio file
             audio, sr = load_audio(audio_path)
             duration = len(audio) / sr
             
-            # 决定音频属于哪个长度组
+            # Decide which length group audio belongs to
             if duration <= 1.0:
-                group = '短(<=1s)'
+                group = 'Short (<=1s)'
             elif duration <= 3.0:
-                group = '中(1-3s)'
+                group = 'Medium (1-3s)'
             elif duration <= 5.0:
-                group = '长(3-5s)'
+                group = 'Long (3-5s)'
             else:
-                group = '超长(>5s)'
+                group = 'Super Long (>5s)'
             
-            # 预处理音频（可选，取决于是否想评估原始音频还是预处理后的音频）
+            # Preprocess audio (optional, depending on whether to evaluate original audio or preprocessed audio)
             audio = standardize_audio_length(audio, sr)
             
-            # 提取特征并预测
+            # Extract features and predict
             start_time = time.time()
             features = inference_engine.preprocessor.process(audio)
             features = inference_engine.feature_extractor.extract_features(features)
@@ -423,16 +423,16 @@ def analyze_audio_length_impact(inference_engine, data_dir, annotation_file):
             
             inference_time = time.time() - start_time
             
-            # 记录结果
+            # Record results
             length_bins[group]['samples'].append(idx)
             length_bins[group]['labels'].append(label_idx)
             length_bins[group]['predictions'].append(prediction.item())
             length_bins[group]['times'].append(inference_time)
         
         except Exception as e:
-            print(f"处理样本时出错 {idx}: {e}")
+            print(f"Error processing sample {idx}: {e}")
     
-    # 计算每个长度组的性能指标
+    # Calculate performance metrics for each length group
     results = []
     
     for group, data in length_bins.items():
@@ -441,40 +441,40 @@ def analyze_audio_length_impact(inference_engine, data_dir, annotation_file):
             precision, recall, f1, _ = precision_recall_fscore_support(
                 data['labels'], data['predictions'], average='macro'
             )
-            avg_time = np.mean(data['times']) * 1000  # 转换为毫秒
+            avg_time = np.mean(data['times']) * 1000  # Convert to milliseconds
             
             results.append({
-                '长度组': group,
-                '样本数量': len(data['samples']),
-                '准确率': accuracy,
-                '精确率(宏平均)': precision,
-                '召回率(宏平均)': recall,
-                'F1分数(宏平均)': f1,
-                '平均推理时间(ms)': avg_time
+                'Length Group': group,
+                'Sample Count': len(data['samples']),
+                'Accuracy': accuracy,
+                'Precision (Macro Average)': precision,
+                'Recall (Macro Average)': recall,
+                'F1 Score (Macro Average)': f1,
+                'Average Inference Time (ms)': avg_time
             })
             
-            print(f"\n{group} 组评估结果 (样本数: {len(data['samples'])}):")
-            print(f"准确率: {accuracy:.4f}")
-            print(f"精确率(宏平均): {precision:.4f}")
-            print(f"召回率(宏平均): {recall:.4f}")
-            print(f"F1分数(宏平均): {f1:.4f}")
-            print(f"平均推理时间: {avg_time:.2f}ms")
+            print(f"\n{group} Group Evaluation Results (Sample Count: {len(data['samples'])}):")
+            print(f"Accuracy: {accuracy:.4f}")
+            print(f"Precision (Macro Average): {precision:.4f}")
+            print(f"Recall (Macro Average): {recall:.4f}")
+            print(f"F1 Score (Macro Average): {f1:.4f}")
+            print(f"Average Inference Time: {avg_time:.2f}ms")
     
     return results
 
 def generate_visualizations(results, output_dir, timestamp, length_impact_results=None):
-    """生成评估结果的可视化"""
+    """Generate visualizations for evaluation results"""
     os.makedirs(output_dir, exist_ok=True)
     
-    # 创建所有模型的准确率对比图
+    # Create accuracy comparison chart for all models
     plt.figure(figsize=(10, 6))
     models = [result['model_type'] for result in results]
     accuracies = [result['accuracy'] for result in results]
     
     plt.bar(models, accuracies, color=['blue', 'green', 'red'][:len(models)])
-    plt.title('模型准确率对比')
-    plt.xlabel('模型')
-    plt.ylabel('准确率')
+    plt.title('Model Accuracy Comparison')
+    plt.xlabel('Model')
+    plt.ylabel('Accuracy')
     plt.ylim(0, 1)
     
     for i, v in enumerate(accuracies):
@@ -482,21 +482,21 @@ def generate_visualizations(results, output_dir, timestamp, length_impact_result
     
     plt.savefig(os.path.join(output_dir, f'{timestamp}_accuracy_comparison.png'))
     
-    # 创建推理时间对比图
+    # Create inference time comparison chart
     plt.figure(figsize=(10, 6))
     inference_times = [result['avg_inference_time_ms'] for result in results]
     
     plt.bar(models, inference_times, color=['blue', 'green', 'red'][:len(models)])
-    plt.title('模型推理时间对比 (ms)')
-    plt.xlabel('模型')
-    plt.ylabel('平均推理时间 (ms)')
+    plt.title('Model Inference Time Comparison (ms)')
+    plt.xlabel('Model')
+    plt.ylabel('Average Inference Time (ms)')
     
     for i, v in enumerate(inference_times):
         plt.text(i, v + 0.5, f'{v:.2f}ms', ha='center')
     
     plt.savefig(os.path.join(output_dir, f'{timestamp}_inference_time_comparison.png'))
     
-    # 为每个模型生成混淆矩阵图
+    # Generate confusion matrix for each model
     for result in results:
         plt.figure(figsize=(10, 8))
         cm = result['confusion_matrix']
@@ -505,24 +505,24 @@ def generate_visualizations(results, output_dir, timestamp, length_impact_result
                    xticklabels=INTENT_CLASSES,
                    yticklabels=INTENT_CLASSES)
         
-        plt.title(f'{result["model_type"]} 混淆矩阵')
-        plt.xlabel('预测类别')
-        plt.ylabel('真实类别')
+        plt.title(f'{result["model_type"]} Confusion Matrix')
+        plt.xlabel('Predicted Class')
+        plt.ylabel('True Class')
         plt.tight_layout()
         
         plt.savefig(os.path.join(output_dir, f'{timestamp}_{result["model_type"]}_confusion_matrix.png'))
     
-    # 为每个模型生成推理时间分布图
+    # Generate inference time distribution for each model
     for result in results:
         plt.figure(figsize=(10, 6))
-        inference_times = np.array(result['all_inference_times']) * 1000  # 转换为毫秒
+        inference_times = np.array(result['all_inference_times']) * 1000  # Convert to milliseconds
         plt.hist(inference_times, bins=30, alpha=0.7, color='blue')
-        plt.title(f'{result["model_type"]} 推理时间分布')
-        plt.xlabel('推理时间 (ms)')
-        plt.ylabel('样本数')
+        plt.title(f'{result["model_type"]} Inference Time Distribution')
+        plt.xlabel('Inference Time (ms)')
+        plt.ylabel('Sample Count')
         plt.savefig(os.path.join(output_dir, f'{timestamp}_{result["model_type"]}_inference_time_distribution.png'))
     
-    # 如果有pipeline结果，还需要展示二级模型的使用比例
+    # If there are pipeline results, also show the proportion of second-level model use
     for result in results:
         if result['model_type'] == 'pipeline' and 'all_is_fast' in result:
             plt.figure(figsize=(8, 8))
@@ -530,52 +530,52 @@ def generate_visualizations(results, output_dir, timestamp, length_impact_result
             precise_count = len(result['all_is_fast']) - fast_count
             
             plt.pie([fast_count, precise_count], 
-                   labels=['快速模型', '精确模型'],
+                   labels=['Fast Model', 'Precise Model'],
                    autopct='%1.1f%%',
                    colors=['lightblue', 'lightgreen'])
             
-            plt.title('推理路径分布')
+            plt.title('Inference Path Distribution')
             plt.savefig(os.path.join(output_dir, f'{timestamp}_pipeline_path_distribution.png'))
     
-    # 如果有音频长度影响分析结果
+    # If there are audio length impact analysis results
     if length_impact_results:
         plt.figure(figsize=(12, 6))
         durations = length_impact_results['durations']
         accuracies = length_impact_results['accuracies']
         times = length_impact_results['times']
         
-        # 创建双y轴图
+        # Create dual y-axis chart
         fig, ax1 = plt.subplots(figsize=(12, 6))
         
         color = 'tab:blue'
-        ax1.set_xlabel('音频长度 (秒)')
-        ax1.set_ylabel('准确率', color=color)
+        ax1.set_xlabel('Audio Length (s)')
+        ax1.set_ylabel('Accuracy', color=color)
         ax1.plot(durations, accuracies, color=color, marker='o')
         ax1.tick_params(axis='y', labelcolor=color)
         
         ax2 = ax1.twinx()
         color = 'tab:red'
-        ax2.set_ylabel('推理时间 (ms)', color=color)
+        ax2.set_ylabel('Inference Time (ms)', color=color)
         ax2.plot(durations, times, color=color, marker='x')
         ax2.tick_params(axis='y', labelcolor=color)
         
-        plt.title('音频长度对准确率和推理时间的影响')
+        plt.title('Impact of Audio Length on Accuracy and Inference Time')
         fig.tight_layout()
         plt.savefig(os.path.join(output_dir, f'{timestamp}_length_impact.png'))
         
     plt.close('all')
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='评估语音意图识别模型')
-    parser.add_argument('--data_dir', type=str, default=DATA_DIR, help='数据目录')
-    parser.add_argument('--annotation_file', type=str, required=True, help='注释文件路径')
-    parser.add_argument('--fast_model', type=str, required=True, help='一级快速分类器路径')
-    parser.add_argument('--precise_model', type=str, help='二级精确分类器路径(可选)')
-    parser.add_argument('--output_dir', type=str, default='evaluation_results', help='输出目录')
-    parser.add_argument('--analyze_length', action='store_true', help='分析音频长度对性能的影响')
+    parser = argparse.ArgumentParser(description='Evaluate speech intent recognition model')
+    parser.add_argument('--data_dir', type=str, default=DATA_DIR, help='Data directory')
+    parser.add_argument('--annotation_file', type=str, required=True, help='Annotation file path')
+    parser.add_argument('--fast_model', type=str, required=True, help='First-level fast classifier path')
+    parser.add_argument('--precise_model', type=str, help='Second-level precise classifier path (optional)')
+    parser.add_argument('--output_dir', type=str, default='evaluation_results', help='Output directory')
+    parser.add_argument('--analyze_length', action='store_true', help='Analyze impact of audio length on performance')
     args = parser.parse_args()
     
-    # 评估模型并保存结果
+    # Evaluate model and save results
     evaluate_models(
         args.data_dir,
         args.annotation_file,

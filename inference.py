@@ -15,43 +15,58 @@ class IntentInferenceEngine:
     def __init__(self, fast_model_path, precise_model_path=None,   
                  fast_confidence_threshold=FAST_CONFIDENCE_THRESHOLD):  
         """  
-        初始化推理引擎  
-        fast_model_path: 一级分类器模型路径  
-        precise_model_path: 二级分类器模型路径(可选)  
-        fast_confidence_threshold: 一级分类器的置信度阈值  
+        Initialize inference engine  
+        fast_model_path: First-level classifier model path  
+        precise_model_path: Second-level classifier model path (optional)  
+        fast_confidence_threshold: Confidence threshold for first-level classifier  
         """  
         self.device = DEVICE  
         self.fast_confidence_threshold = fast_confidence_threshold  
         
-        # 初始化预处理器和特征提取器  
+        # Initialize preprocessor and feature extractor  
         self.preprocessor = AudioPreprocessor()  
         self.feature_extractor = FeatureExtractor()  
         
-        # 加载一级分类器  
-        print("加载一级快速分类器...")  
+        # Load first-level classifier  
+        print("Loading first-level fast classifier...")  
         self.fast_model = self._load_fast_model(fast_model_path)  
         
-        # 如果提供了路径，加载二级分类器  
+        # Load second-level classifier if provided  
         self.precise_model = None  
         if precise_model_path:  
-            print("加载二级精确分类器...")  
+            print("Loading second-level precise classifier...")  
             self.precise_model = self._load_precise_model(precise_model_path)  
-            try:
-                # 先尝试从本地路径加载
-                self.tokenizer = DistilBertTokenizer.from_pretrained(DISTILBERT_MODEL_PATH)
-                print(f"已从本地路径加载DistilBERT分词器: {DISTILBERT_MODEL_PATH}")
-            except Exception as e:
-                print(f"无法从本地加载分词器，错误: {e}")
-                print("尝试从在线资源加载分词器...")
+            
+            # Load DistilBERT tokenizer  
+            print("Loading DistilBERT model from local path:", DISTILBERT_MODEL_PATH)  
+            try:  
+                from transformers import DistilBertModel, DistilBertConfig  
+                
+                # Load from local path or download  
+                config = DistilBertConfig.from_pretrained(DISTILBERT_MODEL_PATH, 
+                                                         hidden_size=PRECISE_MODEL_HIDDEN_SIZE,
+                                                         num_hidden_layers=3)  
+                self.bert_model = DistilBertModel.from_pretrained(DISTILBERT_MODEL_PATH,
+                                                                 config=config)  
+                print("DistilBERT model loaded from local path")  
+            except Exception as e:  
+                print(f"Error loading DistilBERT model: {e}")  
+            
+            # Load tokenizer  
+            try:  
+                self.tokenizer = DistilBertTokenizer.from_pretrained(DISTILBERT_MODEL_PATH)  
+                print("DistilBERT tokenizer loaded from local path:", DISTILBERT_MODEL_PATH)  
+            except:  
+                print("Failed to load tokenizer from local path, downloading from Hugging Face")  
                 self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
         
         # 类别名称  
         self.intent_classes = INTENT_CLASSES  
         
     def _load_fast_model(self, model_path):  
-        """加载一级快速分类器模型"""  
-        # 修复特征维度不匹配的问题
-        input_size = 39  # 使用与训练模型匹配的特征维度(MFCC+Delta+Delta2)
+        """Load first-level fast classifier model"""  
+        # Fix feature dimension mismatch
+        input_size = 39  # Use feature dimension that matches the trained model (MFCC+Delta+Delta2)
         model = FastIntentClassifier(input_size=input_size)  
         model.load_state_dict(torch.load(model_path, map_location=self.device))  
         model = model.to(self.device)  
@@ -59,7 +74,7 @@ class IntentInferenceEngine:
         return model  
     
     def _load_precise_model(self, model_path):  
-        """加载二级精确分类器模型"""  
+        """Load second-level precise classifier model"""  
         model = PreciseIntentClassifier()  
         model.load_state_dict(torch.load(model_path, map_location=self.device))  
         model = model.to(self.device)  
@@ -67,13 +82,13 @@ class IntentInferenceEngine:
         return model  
     
     def preprocess_audio(self, audio):  
-        """预处理音频并提取特征"""  
+        """Preprocess audio and extract features"""  
         start_time = time.time()  
         
-        # 应用预处理  
+        # Apply preprocessing  
         processed_audio = self.preprocessor.process(audio)  
         
-        # 提取特征  
+        # Extract features  
         features = self.feature_extractor.extract_features(processed_audio)  
         
         preprocess_time = time.time() - start_time  
@@ -81,17 +96,17 @@ class IntentInferenceEngine:
         return features, preprocess_time  
     
     def fast_inference(self, features):  
-        """使用一级分类器进行快速推理"""  
+        """Perform fast inference using first-level classifier"""  
         start_time = time.time()  
         
-        # 转换为torch张量并添加批次维度  
+        # Convert to torch tensor and add batch dimension  
         features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)  
         
-        # 推理  
+        # Inference  
         with torch.no_grad():  
             intent_idx, confidence = self.fast_model.predict(features_tensor)  
         
-        # 获取预测的类别和置信度  
+        # Get predicted class and confidence  
         intent_idx = intent_idx.item()  
         confidence = confidence.item()  
         intent_class = self.intent_classes[intent_idx]  
@@ -101,30 +116,32 @@ class IntentInferenceEngine:
         return intent_class, confidence, inference_time  
     
     def precise_inference(self, audio_text):  
-        """使用二级分类器进行精确推理"""  
-        if not self.precise_model:  
+        """Perform precise inference using second-level classifier"""  
+        if self.precise_model is None:  
             return None, 0, 0  
-            
+        
         start_time = time.time()  
         
-        # 将文本转换为模型输入  
+        # Tokenize text input  
         encoding = self.tokenizer(  
             audio_text,  
             max_length=128,  
             padding='max_length',  
             truncation=True,  
             return_tensors='pt'  
-        )  
+        ).to(self.device)  
         
-        input_ids = encoding['input_ids'].to(self.device)  
-        attention_mask = encoding['attention_mask'].to(self.device)  
-        
-        # 推理  
+        # Inference  
         with torch.no_grad():  
-            intent_idx, confidence = self.precise_model.predict(input_ids, attention_mask)  
+            input_ids = encoding['input_ids']  
+            attention_mask = encoding['attention_mask']  
+            outputs = self.precise_model(input_ids, attention_mask)  
+            logits = outputs.logits  
+            probs = F.softmax(logits, dim=1)  
+            confidence, predicted = torch.max(probs, dim=1)  
         
-        # 获取预测的类别和置信度  
-        intent_idx = intent_idx.item()  
+        # Get predicted class and confidence  
+        intent_idx = predicted.item()  
         confidence = confidence.item()  
         intent_class = self.intent_classes[intent_idx]  
         
@@ -134,37 +151,37 @@ class IntentInferenceEngine:
     
     def predict(self, features, confidence_threshold=None):
         """
-        基于特征直接进行预测，支持快速分类器和精确分类器
+        Predict directly based on features, supporting both fast and precise classifiers
         
-        参数:
-            features: 特征，可以是张量（针对快速分类器）或字典（针对精确分类器）
-            confidence_threshold: 置信度阈值，如果为None则使用默认值
+        Args:
+            features: Features, can be tensor (for fast classifier) or dict (for precise classifier)
+            confidence_threshold: Confidence threshold, if None uses default value
             
-        返回:
-            (预测的类别索引, 置信度, 是否使用了快速分类器)
+        Returns:
+            (predicted class index, confidence, whether fast classifier was used)
         """
         threshold = confidence_threshold if confidence_threshold is not None else self.fast_confidence_threshold
         
         try:
-            # 根据特征类型判断使用哪个分类器
+            # Determine which classifier to use based on feature type
             if isinstance(features, torch.Tensor):
-                # 使用快速分类器
+                # Use fast classifier
                 predicted_class, confidence = self.fast_model.predict(features)
                 intent_idx = predicted_class.item()
                 confidence_value = confidence.item()
                 
-                # 如果置信度高于阈值，直接返回结果
+                # If confidence above threshold, return result directly
                 if confidence_value >= threshold:
                     return intent_idx, confidence_value, True
                 
-                # 如果没有精确分类器，仍然返回快速分类器的结果
+                # If no precise classifier, still return fast classifier result
                 if self.precise_model is None:
                     return intent_idx, confidence_value, True
                     
-                # 否则将在下一步使用精确分类器
+                # Otherwise will use precise classifier in next step
                 
             elif isinstance(features, dict) and 'input_ids' in features and 'attention_mask' in features:
-                # 直接使用精确分类器
+                # Use precise classifier directly
                 input_ids = features['input_ids']
                 attention_mask = features['attention_mask']
                 
@@ -176,87 +193,83 @@ class IntentInferenceEngine:
                 return predicted.item(), confidence.item(), False
                 
             else:
-                # 不支持的特征类型
-                print(f"不支持的特征类型: {type(features)}")
-                return 0, 0.0, True  # 返回默认值
+                # Unsupported feature type
+                print(f"Unsupported feature type: {type(features)}")
+                return 0, 0.0, True  # Return default values
                 
         except Exception as e:
-            print(f"预测过程中出错: {str(e)}")
-            return 0, 0.0, True  # 出错时返回默认值
+            print(f"Error during prediction: {str(e)}")
+            return 0, 0.0, True  # Return default values on error
     
     def predict_intent(self, audio, audio_text=None):  
-        """  
-        预测音频的意图  
-        audio: 音频数据numpy数组  
-        audio_text: 可选的音频文本转录(用于二级分类器)  
-        """  
-        # 预处理和特征提取  
-        features, preprocess_time = self.preprocess_audio(audio)  
+        """
+        Predict intent from audio data
         
-        # 一级快速分类  
-        fast_intent, fast_confidence, fast_time = self.fast_inference(features)  
-        
-        # 如果一级分类器置信度高于阈值，直接返回结果  
-        if fast_confidence >= self.fast_confidence_threshold:  
-            total_time = preprocess_time + fast_time  
-            return {  
-                'intent': fast_intent,  
-                'confidence': fast_confidence,  
-                'path': 'fast',  
-                'times': {  
-                    'preprocess': preprocess_time,  
-                    'inference': fast_time,  
-                    'total': total_time  
-                }  
-            }  
-        
-        # 如果有二级分类器且提供了文本，使用二级分类器  
-        if self.precise_model and audio_text:  
-            precise_intent, precise_confidence, precise_time = self.precise_inference(audio_text)  
-            total_time = preprocess_time + fast_time + precise_time  
+        Args:
+            audio: Audio data (numpy array)
+            audio_text: Audio transcription text (optional, for secondary classification)
             
-            # 返回置信度更高的结果  
-            if precise_confidence > fast_confidence:  
-                return {  
-                    'intent': precise_intent,  
-                    'confidence': precise_confidence,  
-                    'path': 'precise',  
-                    'times': {  
-                        'preprocess': preprocess_time,  
-                        'fast_inference': fast_time,  
-                        'precise_inference': precise_time,  
-                        'total': total_time  
-                    }  
-                }  
+        Returns:
+            (intent_class, confidence, preprocessing_time, inference_time, path)
+            path: "fast" or "precise" indicating which model was used
+        """
+        # Preprocess audio and extract features
+        features, preprocess_time = self.preprocess_audio(audio)
         
-        # 默认返回一级分类器结果  
-        total_time = preprocess_time + fast_time  
-        return {  
-            'intent': fast_intent,  
-            'confidence': fast_confidence,  
-            'path': 'fast',  
-            'times': {  
-                'preprocess': preprocess_time,  
-                'inference': fast_time,  
-                'total': total_time  
-            }  
-        }  
+        # First, try fast classifier
+        intent_class, confidence, inference_time = self.fast_inference(features)
+        
+        # If confidence is high enough, return result
+        if confidence >= self.fast_confidence_threshold:
+            return intent_class, confidence, preprocess_time, inference_time, "fast"
+        
+        # If no precise model or no text, use fast result
+        if self.precise_model is None or audio_text is None:
+            return intent_class, confidence, preprocess_time, inference_time, "fast"
+        
+        # Otherwise, use precise model for low-confidence cases
+        precise_intent, precise_confidence, precise_time = self.precise_inference(audio_text)
+        
+        # Use precise model result
+        return precise_intent, precise_confidence, preprocess_time, precise_time, "precise"
     
     def process_audio_file(self, audio_path, transcript=None):  
-        """处理音频文件并返回意图"""  
-        # 加载音频文件  
-        audio, sample_rate = sf.read(audio_path)  
+        """
+        Process audio file and predict intent
         
-        # 确保音频是单声道  
-        if len(audio.shape) > 1:  
-            audio = audio[:, 0]  
+        Args:
+            audio_path: Path to audio file
+            transcript: Optional transcript for precise classification
+            
+        Returns:
+            Prediction result
+        """
+        # Load audio file
+        audio, sr = sf.read(audio_path)
         
-        # 预测意图  
-        result = self.predict_intent(audio, transcript)  
+        # If stereo, convert to mono
+        if len(audio.shape) > 1:
+            audio = np.mean(audio, axis=1)
         
-        return result  
+        # Resample if needed
+        if sr != TARGET_SAMPLE_RATE:
+            import librosa
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=TARGET_SAMPLE_RATE)
+            sr = TARGET_SAMPLE_RATE
+        
+        # Predict intent
+        return self.predict_intent(audio, transcript)
     
     def process_audio_stream(self, audio_stream, transcript=None):  
-        """处理音频流并返回意图"""  
-        result = self.predict_intent(audio_stream, transcript)  
-        return result
+        """
+        Process audio stream data and predict intent
+        
+        Args:
+            audio_stream: Audio data as numpy array
+            transcript: Optional transcript for precise classification
+            
+        Returns:
+            Prediction result
+        """
+        # Predict intent directly from audio stream data
+        return self.predict_intent(audio_stream, transcript)
