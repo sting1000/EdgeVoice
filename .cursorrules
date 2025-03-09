@@ -1,0 +1,150 @@
+{
+  "version": "1.0",
+  "language": "python",
+  "rules": {
+    "formatting": {
+      "lineLength": 100,
+      "indentSize": 4,
+      "useTabs": false,
+      "trailingNewline": true,
+      "trimTrailingWhitespace": true
+    },
+    "linting": {
+      "enablePylint": true,
+      "enableFlake8": true,
+      "enablePycodestyle": true,
+      "enableIsort": true,
+      "enableBlack": true,
+      "ignorePatterns": [
+        "**/data/**",
+        "**/models/distilbert-base-uncased/**",
+        "**/tmp/**",
+        "**/saved_models/**",
+        "**/venv/**"
+      ]
+    },
+    "imports": {
+      "sortImports": true,
+      "groupImports": true,
+      "groupOrder": [
+        "standard_library",
+        "third_party",
+        "first_party",
+        "local_folder"
+      ]
+    },
+    "completion": {
+      "enableAutoImport": true,
+      "enableSnippets": true,
+      "customSnippets": {
+        "librosa-load": {
+          "prefix": "libload",
+          "body": [
+            "audio, sr = librosa.load(\"${1:file_path}\", sr=${2:SAMPLE_RATE})",
+            "${0}"
+          ],
+          "description": "从文件加载音频数据"
+        },
+        "new-audio-function": {
+          "prefix": "audioprocess",
+          "body": [
+            "def process_audio(audio, sr=${1:SAMPLE_RATE}):",
+            "    \"\"\"",
+            "    处理音频信号",
+            "    ",
+            "    参数:",
+            "        audio: 音频数据，numpy数组",
+            "        sr: 采样率",
+            "    ",
+            "    返回:",
+            "        处理后的音频数据",
+            "    \"\"\"",
+            "    ${2:# 实现音频处理逻辑}",
+            "    return audio"
+          ],
+          "description": "创建音频处理函数"
+        },
+        "dataset-class": {
+          "prefix": "audiodataset",
+          "body": [
+            "class ${1:Audio}Dataset(Dataset):",
+            "    \"\"\"音频数据集类\"\"\"",
+            "    ",
+            "    def __init__(self, annotation_file, data_dir=DATA_DIR):",
+            "        \"\"\"初始化数据集\"\"\"",
+            "        self.data_dir = data_dir",
+            "        self.df = pd.read_csv(annotation_file)",
+            "        ",
+            "    def __len__(self):",
+            "        \"\"\"返回数据集大小\"\"\"",
+            "        return len(self.df)",
+            "        ",
+            "    def __getitem__(self, idx):",
+            "        \"\"\"获取一个样本\"\"\"",
+            "        row = self.df.iloc[idx]",
+            "        file_path = os.path.join(self.data_dir, row['file_path'])",
+            "        audio, sr = librosa.load(file_path, sr=SAMPLE_RATE)",
+            "        ${2:# 处理数据}",
+            "        ",
+            "        return {",
+            "            'audio': audio,",
+            "            'label': row['${3:intent}']",
+            "        }"
+          ],
+          "description": "创建音频数据集类"
+        }
+      }
+    },
+    "assistantContext": {
+      "includePatterns": [
+        "**/*.py",
+        "**/*.ipynb",
+        "**/*.md",
+        "**/*.txt",
+        "requirements.txt"
+      ],
+      "excludePatterns": [
+        "**/data/**/*.wav",
+        "**/models/distilbert-base-uncased/**",
+        "**/__pycache__/**",
+        "**/venv/**"
+      ],
+      "fileContextLimit": 10,
+      "relevantCodeWeight": 2.0,
+      "keywordWeight": 1.5,
+      "recentEditWeight": 1.0
+    },
+    "aiCompletions": {
+      "autoTriggerThreshold": 300,
+      "contextLines": 20,
+      "enableBlockMode": true,
+      "enableFunctionMode": true,
+      "enableLineMode": true
+    },
+    "quickFixes": {
+      "enablePythonLintFixes": true,
+      "enableTypoFixes": true,
+      "enableExceptionHandling": true
+    },
+    "documentation": {
+      "autoDocstring": true,
+      "docstringFormat": "google",
+      "docstringParams": true,
+      "docstringReturns": true,
+      "docstringExceptions": true
+    },
+    "audioProcessingLibs": {
+      "suggestImports": ["librosa", "soundfile", "pyaudio", "sounddevice", "wave", "torch.nn.functional"],
+      "suggestFunctions": ["mfcc", "melspectrogram", "stft", "power_to_db", "amplitude_to_db"]
+    }
+  },
+  "filetypes": {
+    "python": true,
+    "markdown": true,
+    "json": true,
+    "plaintext": true,
+    "csv": true,
+    "wav": false,
+    "mp3": false
+  }
+} 

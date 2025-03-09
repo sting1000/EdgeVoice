@@ -15,6 +15,8 @@ from pathlib import Path
 import librosa
 import librosa.display
 import matplotlib.pyplot as plt
+import threading
+import atexit
 
 # 音频参数
 SAMPLE_RATE = 16000  # 采样率
@@ -22,6 +24,26 @@ CHANNELS = 1         # 单声道
 CHUNK = 1024         # 每个缓冲区的帧数
 FORMAT = pyaudio.paInt16  # 16位格式
 MAX_RECORDING_SECONDS = 10  # 最大录音时长
+
+# 全局PyAudio实例，避免重复创建和销毁
+_global_pyaudio = None
+
+def get_pyaudio_instance():
+    """获取全局PyAudio实例"""
+    global _global_pyaudio
+    if _global_pyaudio is None:
+        _global_pyaudio = pyaudio.PyAudio()
+    return _global_pyaudio
+
+def cleanup_pyaudio():
+    """清理全局PyAudio资源"""
+    global _global_pyaudio
+    if _global_pyaudio is not None:
+        _global_pyaudio.terminate()
+        _global_pyaudio = None
+
+# 程序退出时确保清理资源
+atexit.register(cleanup_pyaudio)
 
 class AudioRecorder:
     """音频录制类"""
@@ -40,60 +62,93 @@ class AudioRecorder:
         self.channels = channels
         self.chunk = chunk
         self.format = format
-        self.p = None
         self.stream = None
         self.frames = []
         self.is_recording = False
         self.audio_data = None
+        self.recording_thread = None
+        self._lock = threading.Lock()
     
     def start_recording(self):
         """开始录音"""
-        self.p = pyaudio.PyAudio()
-        self.frames = []
-        self.stream = self.p.open(
-            format=self.format,
-            channels=self.channels,
-            rate=self.sample_rate,
-            input=True,
-            frames_per_buffer=self.chunk
-        )
-        self.is_recording = True
+        with self._lock:
+            if self.is_recording:
+                return
+                
+            try:
+                self.p = get_pyaudio_instance()
+                self.frames = []
+                self.stream = self.p.open(
+                    format=self.format,
+                    channels=self.channels,
+                    rate=self.sample_rate,
+                    input=True,
+                    frames_per_buffer=self.chunk
+                )
+                self.is_recording = True
+            except Exception as e:
+                print(f"打开音频流时出错: {e}")
+                return
         
         # 开始收集音频数据
         start_time = time.time()
         try:
             while self.is_recording and (time.time() - start_time) < MAX_RECORDING_SECONDS:
-                data = self.stream.read(self.chunk)
-                self.frames.append(data)
+                if self.stream and self.is_recording:
+                    data = self.stream.read(self.chunk, exception_on_overflow=False)
+                    self.frames.append(data)
+                else:
+                    break
+                time.sleep(0.001)  # 防止CPU过载
         except Exception as e:
             print(f"录音时出错: {e}")
-            self.stop_recording()
+        finally:
+            self._close_stream()
+    
+    def _close_stream(self):
+        """安全关闭音频流"""
+        with self._lock:
+            if self.stream:
+                try:
+                    self.stream.stop_stream()
+                    self.stream.close()
+                except Exception as e:
+                    print(f"关闭音频流时出错: {e}")
+                finally:
+                    self.stream = None
     
     def stop_recording(self):
         """停止录音"""
+        # 设置标志，通知录音线程停止
         self.is_recording = False
         
-        if self.stream:
-            self.stream.stop_stream()
-            self.stream.close()
-            self.stream = None
+        # 等待录音线程结束（如果存在）
+        if self.recording_thread and self.recording_thread.is_alive():
+            self.recording_thread.join(timeout=1.0)
         
-        if self.p:
-            self.p.terminate()
-            self.p = None
+        # 确保流被关闭
+        self._close_stream()
         
         # 将帧转换为音频数据
-        if self.frames:
-            audio_bytes = b''.join(self.frames)
-            self.audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
-        else:
-            self.audio_data = None
+        with self._lock:
+            if self.frames:
+                try:
+                    audio_bytes = b''.join(self.frames)
+                    self.audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
+                except Exception as e:
+                    print(f"处理录音数据时出错: {e}")
+                    self.audio_data = None
+            else:
+                self.audio_data = None
     
     def play_audio(self):
         """播放录制的音频"""
         if self.audio_data is not None:
-            sd.play(self.audio_data, self.sample_rate)
-            sd.wait()
+            try:
+                sd.play(self.audio_data, self.sample_rate)
+                sd.wait()
+            except Exception as e:
+                print(f"播放音频时出错: {e}")
         else:
             print("没有可播放的音频数据")
     
@@ -115,10 +170,13 @@ class AudioRecorder:
             # 确保目录存在
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             
+            # 使用全局PyAudio实例获取样本大小
+            p = get_pyaudio_instance()
+            
             # 保存为WAV文件
             with wave.open(file_path, 'wb') as wf:
                 wf.setnchannels(self.channels)
-                wf.setsampwidth(pyaudio.PyAudio().get_sample_size(self.format))
+                wf.setsampwidth(p.get_sample_size(self.format))
                 wf.setframerate(self.sample_rate)
                 wf.writeframes(b''.join(self.frames))
             

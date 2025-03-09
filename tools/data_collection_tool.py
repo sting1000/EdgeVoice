@@ -201,8 +201,8 @@ class AudioRecorderApp:
                       "environment", "session_id", "timestamp"]
             df = pd.DataFrame(columns=columns)
             
-            # 保存到CSV
-            df.to_csv(ANNOTATION_FILE, index=False, encoding='utf-8')
+            # 保存到CSV，使用UTF-8-SIG编码使Excel能正确显示中文
+            df.to_csv(ANNOTATION_FILE, index=False, encoding='utf-8-sig')
             print(f"已创建注释文件: {ANNOTATION_FILE}")
     
     def update_prompt(self):
@@ -222,13 +222,20 @@ class AudioRecorderApp:
         self.status_var.set("正在录音...")
         
         # 在新线程中开始录音
-        self.recording_thread = threading.Thread(target=self._record)
-        self.recording_thread.daemon = True
-        self.recording_thread.start()
+        self.recorder.recording_thread = threading.Thread(target=self._record)
+        self.recorder.recording_thread.daemon = True
+        self.recorder.recording_thread.start()
     
     def _record(self):
         """录音线程"""
-        self.recorder.start_recording()
+        try:
+            self.recorder.start_recording()
+        except Exception as e:
+            print(f"录音线程出错: {e}")
+            # 确保在主线程更新UI
+            self.root.after(0, lambda: self.status_var.set("录音出错"))
+            self.root.after(0, lambda: self.record_btn.config(state="normal"))
+            self.root.after(0, lambda: self.stop_btn.config(state="disabled"))
     
     def stop_recording(self):
         """停止录音"""
@@ -287,25 +294,44 @@ class AudioRecorderApp:
                 "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             
-            # 添加到注释文件
-            df = pd.read_csv(ANNOTATION_FILE, encoding='utf-8')
-            df = pd.concat([df, pd.DataFrame([data])], ignore_index=True)
-            df.to_csv(ANNOTATION_FILE, index=False, encoding='utf-8')
-            
-            # 更新会话计数
-            self.session_recordings += 1
-            self.recordings_label.config(text=f"{self.session_recordings} / {RECORDINGS_PER_SESSION}")
-            
-            # 更新UI
-            self.status_var.set("录音已保存")
-            messagebox.showinfo("成功", f"录音已保存: {os.path.basename(file_path)}")
-            
-            # 检查是否需要创建新会话
-            if self.session_recordings >= RECORDINGS_PER_SESSION:
-                self.create_new_session()
-            
-            # 更新提示语
-            self.update_prompt()
+            try:
+                # 添加到注释文件 - 使用UTF-8-SIG编码以兼容Excel
+                if os.path.exists(ANNOTATION_FILE) and os.path.getsize(ANNOTATION_FILE) > 0:
+                    try:
+                        # 先尝试读取现有文件
+                        df = pd.read_csv(ANNOTATION_FILE, encoding='utf-8-sig')
+                    except UnicodeDecodeError:
+                        # 如果读取失败，尝试其他编码
+                        df = pd.read_csv(ANNOTATION_FILE, encoding='utf-8')
+                else:
+                    # 创建新的空DataFrame
+                    columns = ["file_path", "intent", "transcript", "gender", "age_group", 
+                              "environment", "session_id", "timestamp"]
+                    df = pd.DataFrame(columns=columns)
+                
+                # 添加新行
+                df = pd.concat([df, pd.DataFrame([data])], ignore_index=True)
+                
+                # 保存为UTF-8-SIG格式，使Excel能正确显示中文
+                df.to_csv(ANNOTATION_FILE, index=False, encoding='utf-8-sig')
+                
+                # 更新会话计数
+                self.session_recordings += 1
+                self.recordings_label.config(text=f"{self.session_recordings} / {RECORDINGS_PER_SESSION}")
+                
+                # 更新UI
+                self.status_var.set("录音已保存")
+                messagebox.showinfo("成功", f"录音已保存: {os.path.basename(file_path)}")
+                
+                # 检查是否需要创建新会话
+                if self.session_recordings >= RECORDINGS_PER_SESSION:
+                    self.create_new_session()
+                
+                # 更新提示语
+                self.update_prompt()
+            except Exception as e:
+                print(f"保存注释数据时出错: {e}")
+                messagebox.showerror("错误", f"保存注释数据失败: {str(e)}")
         else:
             messagebox.showerror("错误", "保存录音失败")
     
