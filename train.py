@@ -14,9 +14,10 @@ import random
 from config import *  
 # 使用增强版数据加载器替换原始版本
 # from data_utils import prepare_dataloader  
-from augmented_dataset import prepare_augmented_dataloader
+from augmented_dataset import prepare_augmented_dataloader, standardize_audio_length
 from models.fast_classifier import FastIntentClassifier  
 from models.precise_classifier import PreciseIntentClassifier
+import librosa
 
 def set_seed(seed=42):
     """设置随机种子以确保可重现性"""
@@ -28,6 +29,72 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+def extract_features(audio, sr):
+    """提取音频特征
+    
+    参数:
+        audio: 音频数据
+        sr: 采样率
+        
+    返回:
+        提取的特征，形状为(time, features)
+    """
+    try:
+        # 标准化音频长度
+        audio = standardize_audio_length(audio, sr)
+        
+        # 提取MFCC特征
+        # 可以根据需要修改特征提取方法
+        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
+        delta_mfccs = librosa.feature.delta(mfccs)
+        delta2_mfccs = librosa.feature.delta(mfccs, order=2)
+        
+        # 合并特征
+        features = np.concatenate([mfccs, delta_mfccs, delta2_mfccs], axis=0)
+        
+        # 转置为(time, features)格式
+        features = features.T
+        
+        return features
+    except Exception as e:
+        print(f"特征提取错误: {e}")
+        # 返回一个安全的默认特征
+        return np.zeros((100, 39))  # 默认100帧，39个特征
+
+def process_audio_for_precise(audio, sr, tokenizer, transcript=None):
+    """处理音频数据，为精确分类器准备特征
+    
+    参数:
+        audio: 音频数据
+        sr: 采样率
+        tokenizer: 分词器
+        transcript: 文本转录(可选)
+        
+    返回:
+        特征字典，包含input_ids和attention_mask
+    """
+    # 使用提供的文本转录或默认文本
+    if transcript is None or transcript == "":
+        # 在实际场景中，此处应调用ASR模型获取文本
+        text = "未提供转录文本"
+    else:
+        text = transcript
+    
+    # 使用分词器处理文本
+    encoding = tokenizer(
+        text,
+        padding='max_length',
+        truncation=True,
+        max_length=128,
+        return_tensors='pt'
+    )
+    
+    # 提取所需的特征
+    return {
+        'input_ids': encoding['input_ids'].squeeze(0),
+        'attention_mask': encoding['attention_mask'].squeeze(0)
+    }
 
 def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_EPOCHS, 
                     augment=True, augment_prob=0.5, use_cache=True, seed=42):
@@ -41,10 +108,11 @@ def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_
 
     print("准备数据...")  
     # 使用增强版数据加载器
-    train_loader = prepare_augmented_dataloader(
+    train_loader, intent_labels = prepare_augmented_dataloader(
         annotation_file=annotation_file,
         data_dir=data_dir,
         batch_size=BATCH_SIZE,
+        feature_extractor=lambda audio, sr, **kwargs: extract_features(audio, sr),  # 添加feature_extractor
         augment=augment, 
         augment_prob=augment_prob,
         use_cache=use_cache,
@@ -53,10 +121,21 @@ def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_
     
     # 获取输入特征大小
     batch = next(iter(train_loader))
-    input_size = batch['audio_feature'].size(2)
+    features = batch['features']
+    print(f"特征形状: {features.shape}")
     
-    print(f"创建模型(输入大小: {input_size})...")  
-    model = FastIntentClassifier(input_size=input_size)  
+    # 确保特征维度正确
+    if features.dim() == 2:  # (batch_size, feature_dim)
+        input_size = features.size(1)
+    elif features.dim() == 3:  # (batch_size, seq_len, feature_dim)
+        input_size = features.size(2)
+    else:
+        raise ValueError(f"特征维度错误: {features.dim()}, 形状: {features.shape}")
+    
+    num_classes = len(intent_labels)
+    
+    print(f"创建模型(输入大小: {input_size}, 类别数: {num_classes})...")  
+    model = FastIntentClassifier(input_size=input_size, num_classes=num_classes)  
     model = model.to(device)  
     
     # 损失函数和优化器  
@@ -84,8 +163,13 @@ def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_
         
         for batch in progress_bar:  
             # 准备数据（适配新的数据结构）
-            inputs = batch['audio_feature'].to(device)
-            labels = batch['intent_label'].to(device)
+            inputs = batch['features'].to(device)
+            labels = batch['label'].to(device)
+            
+            # 确保输入形状正确 - 如果是2D张量，转换为3D
+            if inputs.dim() == 2:
+                # 添加序列维度 (batch_size, feature_dim) -> (batch_size, 1, feature_dim)
+                inputs = inputs.unsqueeze(1)
             
             # 梯度清零  
             optimizer.zero_grad()  
@@ -155,22 +239,25 @@ def train_precise_model(data_dir, annotation_file, model_save_path, num_epochs=N
         print("已从在线资源加载分词器")
         
     # 使用增强版数据加载器
-    train_loader = prepare_augmented_dataloader(
+    train_loader, intent_labels = prepare_augmented_dataloader(
         annotation_file=annotation_file,
         data_dir=data_dir,
         batch_size=BATCH_SIZE,
-        tokenizer=tokenizer,
+        feature_extractor=lambda audio, sr, transcript=None: process_audio_for_precise(audio, sr, tokenizer, transcript),
         augment=augment,
         augment_prob=augment_prob,
         use_cache=use_cache,
         shuffle=True
     )
     
-    print("创建模型...")  
+    # 获取类别数
+    num_classes = len(intent_labels)
+    print(f"创建模型(类别数: {num_classes})...")
+    
     # 初始化模型
     try:
         model = PreciseIntentClassifier(
-            num_classes=len(INTENT_CLASSES),
+            num_classes=num_classes,  # 使用从数据加载器获取的类别数
             pretrained_path=DISTILBERT_MODEL_PATH
         )
         print(f"已从本地路径初始化精确分类器: {DISTILBERT_MODEL_PATH}")
@@ -205,9 +292,10 @@ def train_precise_model(data_dir, annotation_file, model_save_path, num_epochs=N
         
         for batch in progress_bar:
             # 准备数据（适配新的数据结构）
-            input_ids = batch['input_ids'].to(device)  
-            attention_mask = batch['attention_mask'].to(device)  
-            labels = batch['intent_label'].to(device)
+            features = batch['features']
+            input_ids = features['input_ids'].to(device)  
+            attention_mask = features['attention_mask'].to(device)  
+            labels = batch['label'].to(device)  # 修改为'label'，与augmented_dataset.py中的键名一致
             
             # 梯度清零  
             optimizer.zero_grad()  
