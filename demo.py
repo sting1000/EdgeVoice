@@ -202,10 +202,8 @@ class IntentDemo:
                 result = self.engine.process_audio_stream(audio)  
                 
                 # 输出结果  
-                intent = result['intent']  
-                confidence = result['confidence']  
-                path = result['path']  
-                total_time = result['times']['total']  
+                intent, confidence, preprocess_time, inference_time, path = result
+                total_time = preprocess_time + inference_time
                 
                 print(f"\n检测到意图: {intent}")  
                 print(f"置信度: {confidence:.4f}")  
@@ -240,10 +238,8 @@ class IntentDemo:
         result = self.engine.process_audio_stream(audio)
         
         # 输出结果
-        intent = result['intent']
-        confidence = result['confidence']
-        path = result['path']
-        total_time = result['times']['total']
+        intent, confidence, preprocess_time, inference_time, path = result
+        total_time = preprocess_time + inference_time
         
         print(f"\n文件: {os.path.basename(file_path)}")
         print(f"检测到意图: {intent}")
@@ -324,23 +320,25 @@ class IntentDemo:
         
         print("演示已结束")  
 
-if __name__ == "__main__":  
-    parser = argparse.ArgumentParser(description='语音意图识别演示')  
-    parser.add_argument('--fast_model', type=str, required=True, help='一级快速分类器路径')  
-    parser.add_argument('--precise_model', type=str, help='二级精确分类器路径(可选)')  
-    parser.add_argument('--use_file', action='store_true', help='使用音频文件代替麦克风')
-    parser.add_argument('--file_path', type=str, help='音频文件或目录路径')
-    parser.add_argument('--batch_mode', action='store_true', help='批处理模式，处理目录中的所有音频文件')
-    args = parser.parse_args()  
+if __name__ == "__main__":
+    # 命令行参数解析
+    parser = argparse.ArgumentParser(description='EdgeVoice语音意图识别演示')
+    parser.add_argument('--fast_model', type=str, required=True, help='快速分类器模型路径')
+    parser.add_argument('--precise_model', type=str, default=None, help='精确分类器模型路径（可选）')
+    parser.add_argument('--use_file', action='store_true', help='从文件加载音频，而不是实时录制')
+    parser.add_argument('--file_path', type=str, default=None, help='音频文件路径（--use_file为True时需要）')
+    parser.add_argument('--batch_mode', action='store_true', help='批处理模式（处理目录中的所有音频文件）')
+    parser.add_argument('--use_onnx', action='store_true', help='使用ONNX模型进行推理（暂不支持）')
     
-    # 如果指定了使用文件但未提供文件路径
-    if args.use_file and not args.file_path:
-        parser.error("使用--use_file时必须指定--file_path")
+    args = parser.parse_args()
     
-    # 如果指定了批处理模式但未提供目录
-    if args.batch_mode and not args.file_path:
-        parser.error("使用--batch_mode时必须指定--file_path为有效目录")
+    # 验证参数
+    if args.use_file and not args.file_path and not args.batch_mode:
+        parser.error("使用--use_file需要指定--file_path或启用--batch_mode")
     
-    # 创建并运行演示  
-    demo = IntentDemo(args.fast_model, args.precise_model)  
+    if args.use_onnx:
+        print("ONNX模型推理功能暂未实现，将使用PyTorch模型进行推理")
+    
+    # 初始化演示
+    demo = IntentDemo(args.fast_model, args.precise_model)
     demo.run(use_file=args.use_file, file_path=args.file_path, batch_mode=args.batch_mode)

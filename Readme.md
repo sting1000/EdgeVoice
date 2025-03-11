@@ -66,7 +66,51 @@ python train.py --annotation_file data/annotations.csv --model_type fast --augme
 python train.py --annotation_file data/annotations.csv --model_type precise --augment --augment_prob 0.6
 ```
 
-### 4.3 训练参数说明
+### 4.3 导出ONNX模型
+
+EdgeVoice支持将训练好的PyTorch模型导出为ONNX格式，便于在更多平台上部署和优化推理速度。
+
+#### 在训练过程中导出ONNX模型
+
+您可以在训练模型的同时导出ONNX格式：
+
+```bash
+# 训练并导出快速分类器
+python train.py --annotation_file data/annotations.csv --model_type fast --export_onnx
+
+# 训练并导出精确分类器
+python train.py --annotation_file data/annotations.csv --model_type precise --export_onnx
+
+# 指定ONNX模型保存路径
+python train.py --annotation_file data/annotations.csv --model_type fast --export_onnx --onnx_save_path saved_models/fast_model_optimized.onnx
+```
+
+#### 使用专用脚本转换现有模型
+
+对于已经训练好的模型，可以使用`convert_to_onnx.py`脚本进行转换：
+
+```bash
+# 转换快速分类器
+python convert_to_onnx.py --model_path saved_models/fast_intent_model.pth --model_type fast
+
+# 转换精确分类器
+python convert_to_onnx.py --model_path saved_models/precise_intent_model.pth --model_type precise
+
+# 指定ONNX模型保存路径
+python convert_to_onnx.py --model_path saved_models/fast_intent_model.pth --model_type fast --onnx_path saved_models/fast_optimized.onnx
+
+# 使用静态输入形状（如果目标平台不支持动态形状）
+python convert_to_onnx.py --model_path saved_models/fast_intent_model.pth --model_type fast --static
+```
+
+#### ONNX模型的优势
+
+- **跨平台兼容性**：可在多种推理引擎和硬件上运行
+- **运行时优化**：许多平台可对ONNX模型进行进一步优化
+- **更低的部署复杂度**：不依赖于PyTorch运行环境
+- **更快的推理速度**：在边缘设备上通常能获得更好的性能
+
+### 4.4 训练参数说明
 
 基本参数:
 - `--annotation_file`: 训练数据集的注释CSV文件路径（必需）
@@ -80,7 +124,11 @@ python train.py --annotation_file data/annotations.csv --model_type precise --au
 - `--use_cache`: 启用音频缓存以加速训练（默认启用）
 - `--seed`: 随机种子，用于确保实验可重复性，默认为42
 
-### 4.4 支持的数据增强方法
+ONNX导出参数:
+- `--export_onnx`: 训练后导出模型为ONNX格式
+- `--onnx_save_path`: ONNX模型保存路径（默认使用与PyTorch模型相同的文件名，但扩展名为.onnx）
+
+### 4.5 支持的数据增强方法
 
 系统内置以下音频增强技术，可实时增强训练样本：
 

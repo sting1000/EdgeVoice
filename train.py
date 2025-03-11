@@ -18,6 +18,7 @@ from augmented_dataset import prepare_augmented_dataloader, standardize_audio_le
 from models.fast_classifier import FastIntentClassifier  
 from models.precise_classifier import PreciseIntentClassifier
 import librosa
+import torch.onnx
 
 def set_seed(seed=42):
     """设置随机种子以确保可重现性"""
@@ -381,6 +382,117 @@ def plot_training_curves(history, save_dir, model_type, augment=True):
     plt.savefig(os.path.join(save_dir, f"{model_type}_training_curves_{aug_str}.png"))
     plt.close()
 
+def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_axes=True):
+    """
+    将PyTorch模型导出为ONNX格式
+    
+    Args:
+        model_path: PyTorch模型路径
+        model_type: 模型类型 ('fast' 或 'precise')
+        onnx_save_path: ONNX模型保存路径（如果为None则根据原模型路径生成）
+        dynamic_axes: 是否使用动态轴（用于支持可变输入大小）
+    
+    Returns:
+        onnx_save_path: 导出的ONNX模型路径
+    """
+    print(f"正在导出{model_type}模型到ONNX格式...")
+    
+    # 如果未指定ONNX保存路径，则根据PyTorch模型路径生成
+    if onnx_save_path is None:
+        onnx_save_path = os.path.splitext(model_path)[0] + '.onnx'
+    
+    # 设置设备
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if model_type == 'fast':
+        # 加载FastIntentClassifier模型
+        # 注意: 由于缺少input_size参数，我们需要先创建一个示例模型
+        # 我们使用MFCC特征加上上下文帧，所以特征大小为(N_MFCC * (2*CONTEXT_FRAMES + 1))
+        input_size = N_MFCC * (2*CONTEXT_FRAMES + 1)
+        model = FastIntentClassifier(input_size=input_size, num_classes=len(INTENT_CLASSES))
+        
+        # 加载保存的权重
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.to(device)
+        model.eval()
+        
+        # 创建示例输入
+        dummy_input = torch.randn(1, 1, input_size, device=device)  # 批量大小为1，序列长度为1
+        
+        # 定义ONNX导出的输入和输出名称
+        input_names = ["input"]
+        output_names = ["output"]
+        
+        # 定义动态轴（如果需要）
+        dynamic_axes_dict = None
+        if dynamic_axes:
+            dynamic_axes_dict = {
+                'input': {0: 'batch_size', 1: 'sequence_length'},  # 动态批量大小和序列长度
+                'output': {0: 'batch_size'}
+            }
+        
+        # 导出模型
+        torch.onnx.export(
+            model,
+            dummy_input,
+            onnx_save_path,
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes_dict,
+            export_params=True,
+            opset_version=12,
+            do_constant_folding=True,
+            verbose=False
+        )
+    
+    elif model_type == 'precise':
+        # 加载PreciseIntentClassifier模型
+        model = PreciseIntentClassifier(num_classes=len(INTENT_CLASSES))
+        
+        # 加载保存的权重
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.to(device)
+        model.eval()
+        
+        # 创建示例输入
+        # 假设我们使用的最大序列长度为128
+        max_length = 128
+        dummy_input_ids = torch.randint(0, 30522, (1, max_length), device=device)  # 批量大小为1，序列长度为max_length
+        dummy_attention_mask = torch.ones((1, max_length), device=device)
+        
+        # 定义ONNX导出的输入和输出名称
+        input_names = ["input_ids", "attention_mask"]
+        output_names = ["output"]
+        
+        # 定义动态轴（如果需要）
+        dynamic_axes_dict = None
+        if dynamic_axes:
+            dynamic_axes_dict = {
+                'input_ids': {0: 'batch_size', 1: 'sequence_length'},
+                'attention_mask': {0: 'batch_size', 1: 'sequence_length'},
+                'output': {0: 'batch_size'}
+            }
+        
+        # 导出模型
+        torch.onnx.export(
+            model,
+            (dummy_input_ids, dummy_attention_mask),
+            onnx_save_path,
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes_dict,
+            export_params=True,
+            opset_version=12,
+            do_constant_folding=True,
+            verbose=False
+        )
+    
+    else:
+        raise ValueError(f"不支持的模型类型: {model_type}")
+    
+    print(f"模型已导出至: {onnx_save_path}")
+    return onnx_save_path
+
 if __name__ == "__main__":  
     parser = argparse.ArgumentParser(description='训练语音意图识别模型')  
     parser.add_argument('--data_dir', type=str, default=DATA_DIR, help='数据目录')  
@@ -391,14 +503,17 @@ if __name__ == "__main__":
     parser.add_argument('--augment_prob', type=float, default=0.5, help='数据增强概率')
     parser.add_argument('--use_cache', action='store_true', default=True, help='是否缓存音频数据')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
+    parser.add_argument('--export_onnx', action='store_true', help='是否导出为ONNX模型')
+    parser.add_argument('--onnx_save_path', type=str, default=None, help='ONNX模型保存路径')
     args = parser.parse_args()  
     
     # 确保模型目录存在
     os.makedirs(MODEL_DIR, exist_ok=True)
     model_save_path = os.path.join(MODEL_DIR, f"{args.model_type}_intent_model.pth")  
     
+    # 训练模型
     if args.model_type == 'fast':  
-        train_fast_model(
+        model = train_fast_model(
             args.data_dir, 
             args.annotation_file, 
             model_save_path, 
@@ -409,7 +524,7 @@ if __name__ == "__main__":
             args.seed
         )  
     else:  
-        train_precise_model(
+        model = train_precise_model(
             args.data_dir, 
             args.annotation_file, 
             model_save_path, 
@@ -419,3 +534,7 @@ if __name__ == "__main__":
             args.use_cache,
             args.seed
         )
+    
+    # 导出ONNX模型（如果需要）
+    if args.export_onnx:
+        export_model_to_onnx(model_save_path, args.model_type, args.onnx_save_path)
