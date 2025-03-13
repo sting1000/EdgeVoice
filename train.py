@@ -145,8 +145,12 @@ def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_
     
     num_classes = len(intent_labels)
     
-    print(f"创建模型(输入大小: {input_size}, 类别数: {num_classes})...")  
-    model = FastIntentClassifier(input_size=input_size, num_classes=num_classes)  
+    print(f"创建Conformer模型(输入大小: {input_size}, 隐藏大小: {FAST_MODEL_HIDDEN_SIZE}, 类别数: {num_classes})...")  
+    print(f"  - 层数: {CONFORMER_LAYERS}")
+    print(f"  - 注意力头数: {CONFORMER_ATTENTION_HEADS}")
+    print(f"  - 卷积核大小: {CONFORMER_CONV_KERNEL_SIZE}")
+    print(f"  - 前馈网络扩展因子: {CONFORMER_FF_EXPANSION_FACTOR}")
+    model = FastIntentClassifier(input_size=input_size, hidden_size=FAST_MODEL_HIDDEN_SIZE, num_classes=num_classes)  
     model = model.to(device)  
     
     # 损失函数和优化器  

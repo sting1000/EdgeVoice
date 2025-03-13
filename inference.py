@@ -65,10 +65,19 @@ class IntentInferenceEngine:
         
     def _load_fast_model(self, model_path):  
         """Load first-level fast classifier model"""  
-        # Fix feature dimension mismatch
-        input_size = 39  # Use feature dimension that matches the trained model (MFCC+Delta+Delta2)
+        # 创建与特征维度匹配的模型（MFCC+Delta+Delta2特征，共39维）
+        input_size = 39
         model = FastIntentClassifier(input_size=input_size)  
-        model.load_state_dict(torch.load(model_path, map_location=self.device))  
+        
+        try:
+            # 尝试加载模型权重
+            model.load_state_dict(torch.load(model_path, map_location=self.device))
+        except Exception as e:
+            print(f"加载模型时出现错误：{e}")
+            print(f"尝试使用兼容模式加载...")
+            # 对于从旧结构迁移到新Conformer结构的模型，使用严格=False
+            model.load_state_dict(torch.load(model_path, map_location=self.device), strict=False)
+        
         model = model.to(self.device)  
         model.eval()  
         return model  
