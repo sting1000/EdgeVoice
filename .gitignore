@@ -32,6 +32,7 @@ env.bak/
 venv.bak/
 edgevoice/
 anaconda3/
+deployment_example/
 
 # 数据目录（根据需要可以注释掉）
 data/

@@ -29,7 +29,7 @@ InferenceEngine::InferenceEngine(const std::string& model_path,
       intent_classes_(intent_classes),
       sample_rate_(sample_rate),
       target_audio_length_(target_audio_length),
-      model_handle_(nullptr),
+      model_manager_(nullptr),
       is_initialized_(false) {
     
     // 如果没有提供意图类别，使用默认类别
@@ -44,14 +44,19 @@ InferenceEngine::InferenceEngine(const std::string& model_path,
     // 创建音频预处理器和特征提取器
     audio_preprocessor_ = std::make_unique<AudioPreprocessor>(sample_rate_);
     feature_extractor_ = std::make_unique<FeatureExtractor>(sample_rate_);
+    
+    // 创建HiAI模型管理器
+    model_manager_ = new HIAIModelManager();
 }
 
 InferenceEngine::~InferenceEngine() {
     // 释放模型资源
-    if (model_handle_ != nullptr) {
-        // 在实际应用中，这里应调用HiAI框架的模型释放接口
-        // 例如：hiai_engine->Release(model_handle_);
-        model_handle_ = nullptr;
+    if (model_manager_ != nullptr) {
+        if (is_initialized_) {
+            model_manager_->UnloadModel();
+        }
+        delete model_manager_;
+        model_manager_ = nullptr;
     }
 }
 
@@ -65,17 +70,14 @@ bool InferenceEngine::init() {
         }
         model_file.close();
         
-        // 在实际应用中，这里应调用HiAI框架的模型加载接口
-        // 例如：
-        // hiai_status status = hiai_engine->LoadOMCModel(model_path_.c_str(), &model_handle_);
-        // if (status != HIAI_SUCCESS) {
-        //     std::cerr << "模型加载失败，错误码: " << status << std::endl;
-        //     return false;
-        // }
+        // 加载模型
+        OH_NN_ReturnCode ret = model_manager_->LoadModelFromBuffer(model_path_);
+        if (ret != OH_NN_SUCCESS) {
+            std::cerr << "模型加载失败，错误码: " << ret << std::endl;
+            return false;
+        }
         
-        // 模拟加载模型
-        std::cout << "加载模型: " << model_path_ << std::endl;
-        model_handle_ = reinterpret_cast<void*>(1);  // 非空指针表示加载成功
+        std::cout << "加载模型: " << model_path_ << " 成功" << std::endl;
         is_initialized_ = true;
         
         return true;
@@ -93,8 +95,11 @@ std::pair<std::vector<std::vector<float>>, float> InferenceEngine::preprocessAud
     auto start_time = std::chrono::high_resolution_clock::now();
     
     // 1. 标准化音频长度
-    int target_length = static_cast<int>(target_audio_length_ * sample_rate_);
-    std::vector<float> standardized_audio = standardizeAudioLength(audio_data, target_length);
+    std::vector<float> standardized_audio = standardizeAudioLength(
+        audio_data, 
+        sample_rate, 
+        target_audio_length_
+    );
     
     // 2. 应用预处理
     std::vector<float> processed_audio = audio_preprocessor_->process(standardized_audio, sample_rate);
@@ -112,62 +117,70 @@ std::pair<std::vector<std::vector<float>>, float> InferenceEngine::preprocessAud
     return std::make_pair(context_features, processing_time);
 }
 
+std::vector<InputDataMessage> InferenceEngine::prepareInputData(
+    const std::vector<std::vector<float>>& features) {
+    
+    // 计算特征总大小
+    int num_frames = features.size();
+    int num_features = (num_frames > 0) ? features[0].size() : 0;
+    int total_size = num_frames * num_features;
+    
+    // 创建连续内存缓冲区
+    uint8_t* data_buffer = new uint8_t[total_size * sizeof(float)];
+    float* float_buffer = reinterpret_cast<float*>(data_buffer);
+    
+    // 复制特征数据到缓冲区
+    int idx = 0;
+    for (const auto& frame : features) {
+        for (float val : frame) {
+            float_buffer[idx++] = val;
+        }
+    }
+    
+    // 创建输入数据消息
+    InputDataMessage input_message;
+    input_message.data = data_buffer;
+    input_message.dims = {1, static_cast<int32_t>(num_frames), static_cast<int32_t>(num_features), 1}; // NHWC格式
+    input_message.imageFormat = HiAI_ImageFormat::HIAI_INVALID_FORMAT; // 不是图像数据
+    input_message.databyteLen = sizeof(float);
+    
+    return {input_message};
+}
+
 std::pair<int, float> InferenceEngine::runInference(const std::vector<std::vector<float>>& features) {
     if (!is_initialized_) {
         throw std::runtime_error("推理引擎未初始化");
     }
     
-    // 在实际应用中，这里应调用HiAI框架的推理接口
-    // 例如：
     // 1. 准备输入数据
-    // hiai_tensor_t input_tensor;
-    // hiai_status status = hiai_engine->CreateTensor(&input_tensor);
-    // 
-    // // 2. 将特征数据复制到输入张量
-    // float* input_data = static_cast<float*>(input_tensor.data);
-    // for (size_t i = 0; i < features.size(); ++i) {
-    //     for (size_t j = 0; j < features[i].size(); ++j) {
-    //         input_data[i * features[i].size() + j] = features[i][j];
-    //     }
-    // }
-    // 
-    // // 3. 执行推理
-    // hiai_tensor_t output_tensor;
-    // status = hiai_engine->Inference(model_handle_, input_tensor, &output_tensor);
-    // 
-    // // 4. 获取输出结果
-    // float* output_data = static_cast<float*>(output_tensor.data);
-    // 
-    // // 5. 找出最大值对应的类别索引和置信度
-    // int max_idx = 0;
-    // float max_conf = output_data[0];
-    // for (int i = 1; i < intent_classes_.size(); ++i) {
-    //     if (output_data[i] > max_conf) {
-    //         max_conf = output_data[i];
-    //         max_idx = i;
-    //     }
-    // }
+    std::vector<InputDataMessage> input_data = prepareInputData(features);
     
-    // 模拟推理过程
-    // 创建一个随机的输出分布
-    std::vector<float> output_probs(intent_classes_.size());
-    float sum = 0.0f;
-    
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    
-    for (size_t i = 0; i < output_probs.size(); ++i) {
-        output_probs[i] = dist(gen);
-        sum += output_probs[i];
+    // 2. 初始化输入输出张量
+    OH_NN_ReturnCode ret = model_manager_->InitIOTensors(input_data, AippStatus::NOT_AIPP);
+    if (ret != OH_NN_SUCCESS) {
+        throw std::runtime_error("初始化输入输出张量失败，错误码: " + std::to_string(ret));
     }
     
-    // 归一化为概率分布
-    for (float& prob : output_probs) {
-        prob /= sum;
+    // 3. 执行推理
+    ret = model_manager_->RunModel();
+    if (ret != OH_NN_SUCCESS) {
+        throw std::runtime_error("模型推理失败，错误码: " + std::to_string(ret));
+    }
+    
+    // 4. 准备输出张量
+    ret = model_manager_->PrepareOutputTensor();
+    if (ret != OH_NN_SUCCESS) {
+        throw std::runtime_error("准备输出张量失败，错误码: " + std::to_string(ret));
+    }
+    
+    // 5. 获取推理结果
+    std::vector<std::vector<float>> results = model_manager_->GetResult();
+    if (results.empty() || results[0].empty()) {
+        throw std::runtime_error("获取推理结果失败，结果为空");
     }
     
     // 找出最大值的索引和置信度
+    std::vector<float>& output_probs = results[0];
     int max_idx = 0;
     float max_conf = output_probs[0];
     
@@ -176,6 +189,11 @@ std::pair<int, float> InferenceEngine::runInference(const std::vector<std::vecto
             max_conf = output_probs[i];
             max_idx = static_cast<int>(i);
         }
+    }
+    
+    // 释放为输入数据分配的内存
+    for (auto& input : input_data) {
+        delete[] input.data;
     }
     
     return std::make_pair(max_idx, max_conf);

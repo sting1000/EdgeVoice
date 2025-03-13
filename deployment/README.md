@@ -1,173 +1,133 @@
-# EdgeVoice 部署指南
+# EdgeVoice HiAI部署
 
-本文档介绍如何在华为设备上使用HiAI推理框架部署EdgeVoice模型。
+本项目是EdgeVoice语音意图识别系统在华为HiAI框架上的部署实现。该实现使用C++语言，可以在支持HiAI框架的华为设备上运行。
 
-## 简介
-
-EdgeVoice部署模块提供了以下功能：
-
-1. 音频处理：包括重采样、预加重、VAD、静音消除和降噪等功能
-2. MFCC特征提取：支持生成带上下文的MFCC特征
-3. 意图识别推理接口：支持使用OMC模型进行意图识别
-4. 应用示例：提供使用上述功能的完整示例
-
-## 目录结构
+## 项目结构
 
 ```
 deployment/
-├── CMakeLists.txt        # CMake构建文件
-├── include/              # 头文件目录
-│   ├── audio_processor.h # 音频处理头文件
-│   └── inference_engine.h # 推理引擎头文件
-├── src/                  # 源文件目录
-│   ├── audio_processor.cpp # 音频处理实现
-│   ├── inference_engine.cpp # 推理引擎实现
-│   └── main.cpp         # 主程序示例
-├── utils/               # 辅助工具脚本
-│   ├── model_converter.py # 模型转换工具
+├── include/                  # 头文件目录
+│   ├── audio_processor.h     # 音频处理和特征提取
+│   └── inference_engine.h    # 推理引擎接口
+├── src/                      # 源文件目录
+│   ├── audio_processor.cpp   # 音频处理和特征提取实现
+│   ├── inference_engine.cpp  # 推理引擎实现
+│   └── main.cpp              # 主程序
+├── tools/                    # 工具脚本
+│   ├── model_converter.py    # 模型转换工具
 │   └── performance_tester.py # 性能测试工具
-└── README.md            # 部署说明文档
+├── CMakeLists.txt            # CMake构建文件
+└── README.md                 # 本文档
 ```
 
 ## 编译要求
 
-- CMake 3.10 或更高版本
-- 支持C++17的编译器 (如GCC 7+)
-- 华为HiAI SDK (根据目标设备选择适当版本)
+- CMake 3.8+
+- C++11兼容的编译器
+- 华为HiAI开发环境
+- 华为设备开发工具链
 
 ## 编译步骤
 
-1. 创建构建目录
+1. 设置HiAI开发环境变量：
 
 ```bash
-mkdir -p build
-cd build
+export HIAI_INCLUDE_DIR=/path/to/hiai/include
+export HIAI_LIB_DIR=/path/to/hiai/lib
 ```
 
-2. 配置构建
+2. 创建构建目录并编译：
 
 ```bash
-cmake -DCMAKE_BUILD_TYPE=Release ..
-```
-
-3. 编译代码
-
-```bash
+mkdir -p build && cd build
+cmake ..
 make -j4
 ```
 
-4. (可选) 安装可执行文件
+3. 安装（可选）：
 
 ```bash
 make install
 ```
-
-编译成功后，您将在`build`目录（或安装后的路径）中找到`edgevoice`可执行文件。
 
 ## 使用方法
 
 ### 基本用法
 
 ```bash
-./edgevoice <模型路径> <音频文件路径>
+./bin/edgevoice [模型路径] [音频文件路径]
 ```
 
-例如：
+参数说明：
+- `模型路径`：OMC模型文件路径，默认为`/data/local/tmp/edgevoice_fast.omc`
+- `音频文件路径`：要识别的WAV音频文件路径
 
+示例：
 ```bash
-./edgevoice model.omc test.wav
+./bin/edgevoice /data/local/tmp/edgevoice_fast.omc test.wav
 ```
 
 ### 批处理多个音频文件
 
 ```bash
-./edgevoice <模型路径> <音频文件1> <音频文件2> ...
+./bin/edgevoice [模型路径] [音频文件1] [音频文件2] ...
 ```
 
-例如：
-
+示例：
 ```bash
-./edgevoice model.omc test1.wav test2.wav test3.wav
+./bin/edgevoice /data/local/tmp/edgevoice_fast.omc test1.wav test2.wav test3.wav
 ```
 
-### 输出说明
+## 集成到应用中
 
-程序会输出每个音频文件的识别结果，包括：
+要将EdgeVoice集成到您的应用中，您需要：
 
-- 识别的意图类别
-- 置信度百分比
-- 预处理时间（毫秒）
-- 推理时间（毫秒）
-- 总处理时间（毫秒）
-
-## 集成到其他应用
-
-如果要将EdgeVoice集成到其他应用中，可以参考以下步骤：
-
-1. 包含必要的头文件：
-
+1. 包含头文件：
 ```cpp
 #include "inference_engine.h"
 ```
 
 2. 创建并初始化推理引擎：
-
 ```cpp
-edgevoice::InferenceEngine engine("path/to/model.omc", 0.7f);
+edgevoice::InferenceEngine engine("/data/local/tmp/edgevoice_fast.omc");
 if (!engine.init()) {
     // 处理初始化失败
-    return;
 }
 ```
 
-3. 从WAV文件或音频数据进行预测：
-
+3. 进行意图识别：
 ```cpp
-// 从WAV文件预测
+// 从WAV文件识别
 auto result = engine.predictFromWavFile("audio.wav");
 
-// 或从音频数据预测
-std::vector<float> audio_data = /*...获取音频数据...*/;
+// 或从音频数据识别
+std::vector<float> audio_data = /* 获取音频数据 */;
 int sample_rate = 16000;
 auto result = engine.predictIntent(audio_data, sample_rate);
 
-// 处理结果
-std::cout << "识别的意图: " << result.intent_class << std::endl;
+// 使用识别结果
+std::cout << "意图: " << result.intent_class << std::endl;
 std::cout << "置信度: " << result.confidence << std::endl;
+```
+
+## 模型转换
+
+使用`tools/model_converter.py`将ONNX模型转换为HiAI OMC格式：
+
+```bash
+python tools/model_converter.py --input model.onnx --output model.omc
+```
+
+## 性能测试
+
+使用`tools/performance_tester.py`测试模型在设备上的性能：
+
+```bash
+python tools/performance_tester.py --model /data/local/tmp/edgevoice_fast.omc --test_dir /path/to/test/wavs
 ```
 
 ## 注意事项
 
-1. 本实现兼容华为HiAI框架，可以在华为单框架设备上运行
-2. 音频文件应为WAV格式，支持16位、24位和32位PCM格式
-3. 默认支持的意图类别包括：
-   - CAPTURE_AND_DESCRIBE
-   - CAPTURE_REMEMBER
-   - CAPTURE_SCAN_QR
-   - TAKE_PHOTO
-   - START_RECORDING
-   - STOP_RECORDING
-   - GET_BATTERY_LEVEL
-   - OTHERS
-
-## 工具说明
-
-### 模型转换工具
-
-位于`utils/model_converter.py`，用于将PyTorch模型转换为OMC格式。
-
-```bash
-python utils/model_converter.py --onnx model.onnx --output model.omc
-```
-
-### 性能测试工具
-
-位于`utils/performance_tester.py`，用于测试模型在设备上的性能。
-
-```bash
-python utils/performance_tester.py --model model.omc --data test_data/ --iterations 100
-```
-
----
-
-如有问题或需要进一步帮助，请联系技术支持团队。 
+- 确保音频文件为WAV格式，采样率为16kHz，单声道
+- 模型文件必须是HiAI支持的OMC格式
+- 在设备上运行时，确保有足够的权限访问模型和音频文件 

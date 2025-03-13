@@ -1,51 +1,70 @@
-cmake_minimum_required(VERSION 3.10)
-project(EdgeVoice VERSION 1.0)
+# EdgeVoice HiAI部署 CMakeLists.txt
+cmake_minimum_required(VERSION 3.8)
+project(EdgeVoice VERSION 1.0.0 LANGUAGES CXX)
 
 # 设置C++标准
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 如果未定义构建类型，设置为Release
+# 设置构建类型
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# 设置编译器标志
+# 设置编译选项
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-z,relro,-z,now -Wl,-z,noexecstack -fPIC -fPIE -pie")
 
-# 设置include目录
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+# 添加安全编译选项
+add_compile_options(-fstack-protector-all -fPIC)
 
-# 设置源文件
-set(SOURCES 
-    src/audio_processor.cpp
-    src/inference_engine.cpp
-    src/main.cpp
+# 设置输出目录
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+# 包含目录
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    # HiAI相关头文件目录
+    ${HIAI_INCLUDE_DIR}
 )
 
-# 创建可执行文件
+# 链接目录
+link_directories(
+    # HiAI相关库目录
+    ${HIAI_LIB_DIR}
+)
+
+# 源文件
+set(SOURCES
+    src/main.cpp
+    src/inference_engine.cpp
+    src/audio_processor.cpp
+)
+
+# 可执行文件
 add_executable(edgevoice ${SOURCES})
 
-# 如果在实际部署中需要链接HiAI库，添加相应的链接
-# target_link_libraries(edgevoice ${HIAI_LIBRARIES})
+# 链接库
+target_link_libraries(edgevoice
+    # HiAI相关库
+    hiai_foundation
+    neural_network_core
+    # 系统库
+    hilog_ndk.z
+    # 其他依赖库
+    m
+    dl
+)
 
-# 设置安装路径
-if(NOT CMAKE_INSTALL_PREFIX)
-    set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install")
-endif()
+# 安装规则
+install(TARGETS edgevoice
+    RUNTIME DESTINATION bin
+)
 
-# 设置安装规则
-install(TARGETS edgevoice DESTINATION bin)
-
-# 输出构建信息
-message(STATUS "")
-message(STATUS "EdgeVoice Configuration Summary")
-message(STATUS "------------------------------")
-message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "C++ Compiler: ${CMAKE_CXX_COMPILER}")
-message(STATUS "C++ flags: ${CMAKE_CXX_FLAGS}")
-message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
-message(STATUS "") 
+# 打印配置信息
+message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
+message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
+message(STATUS "CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}: ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}}") 

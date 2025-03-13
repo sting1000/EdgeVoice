@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <utility>
 
+// 添加HiAI相关头文件
+#include "HIAIModelManager.h"
 #include "audio_processor.h"
 
 namespace edgevoice {
@@ -120,16 +122,26 @@ private:
      * @return std::pair<int, float> 意图索引和置信度
      */
     std::pair<int, float> runInference(const std::vector<std::vector<float>>& features);
+    
+    /**
+     * @brief 将特征转换为HiAI输入格式
+     * 
+     * @param features 特征矩阵
+     * @return std::vector<InputDataMessage> HiAI输入数据
+     */
+    std::vector<InputDataMessage> prepareInputData(const std::vector<std::vector<float>>& features);
 
     std::string model_path_;
     float fast_confidence_threshold_;
     std::vector<std::string> intent_classes_;
+    int sample_rate_;
+    float target_audio_length_;
 
-    std::unique_ptr<AudioPreprocessor> preprocessor_;
+    std::unique_ptr<AudioPreprocessor> audio_preprocessor_;
     std::unique_ptr<FeatureExtractor> feature_extractor_;
 
-    // HiAI相关的成员变量（具体实现时根据HiAI API调整）
-    void* model_handle_; // 实际使用时替换为HiAI的模型句柄类型
+    // HiAI相关的成员变量
+    HIAIModelManager* model_manager_;
     bool is_initialized_;
 };
 
