@@ -12,6 +12,11 @@
 #include <cstring>
 #include <random>
 
+// 定义M_PI（如果不存在）
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 // 用于WAV文件解析的简单结构体
 struct WavHeader {
     char riff[4];                // RIFF标识
@@ -44,8 +49,6 @@ AudioPreprocessor::AudioPreprocessor(
     target_sample_rate_(target_sample_rate),
     vad_energy_threshold_(vad_energy_threshold),
     vad_zcr_threshold_(vad_zcr_threshold),
-    frame_length_ms_(frame_length_ms),
-    frame_shift_ms_(frame_shift_ms),
     frame_length_(static_cast<int>(frame_length_ms * target_sample_rate / 1000.0f)),
     frame_shift_(static_cast<int>(frame_shift_ms * target_sample_rate / 1000.0f)),
     min_speech_frames_(static_cast<int>(100 / frame_shift_ms)),   // 100ms 最小语音段
@@ -179,7 +182,7 @@ std::vector<std::pair<int, int>> AudioPreprocessor::detectVoiceActivity(const st
     // 根据能量和过零率判断语音段
     bool in_speech = false;
     int speech_start = 0;
-    int min_speech_frames = static_cast<int>(0.1 * sample_rate_ / frame_shift_); // 最小语音段长度：100ms
+    int min_speech_frames = min_speech_frames_; // 最小语音段长度（帧数）
     
     for (int i = 0; i < num_frames; ++i) {
         bool is_speech = (energies[i] > vad_energy_threshold_) || 
@@ -272,7 +275,9 @@ FeatureExtractor::FeatureExtractor(
     n_mfcc_(n_mfcc),
     n_fft_(n_fft),
     hop_length_(hop_length),
-    context_frames_(context_frames)
+    context_frames_(context_frames),
+    n_filters_(40),  // 默认Mel滤波器数量
+    n_dim_(n_fft / 2 + 1)  // FFT输出维度
 {
 }
 
@@ -280,40 +285,209 @@ FeatureExtractor::~FeatureExtractor() {
     // 析构函数，无需特殊操作
 }
 
-// 注：实际实现中，应该使用专业的MFCC提取库，如KFR、Eigen或HiAI提供的API
-// 以下是简化实现，仅展示基本思路
+std::vector<float> FeatureExtractor::preEmphasis(const std::vector<float>& signal, float coef) {
+    if (signal.empty()) {
+        return {};
+    }
+    
+    std::vector<float> emphasized(signal.size());
+    emphasized[0] = signal[0];
+    
+    for (size_t i = 1; i < signal.size(); ++i) {
+        emphasized[i] = signal[i] - coef * signal[i - 1];
+    }
+    
+    return emphasized;
+}
+
+std::vector<float> FeatureExtractor::getHammingWindow(bool periodic) {
+    int window_length = n_fft_;
+    int normSize = periodic ? window_length - 1 : window_length;
+    
+    std::vector<float> window(window_length);
+    for (int i = 0; i < window_length; ++i) {
+        float pi = 3.14159f;
+        window[i] = 0.54f - (0.46f * std::cos((2.0f * pi * i) / normSize));
+    }
+    
+    return window;
+}
+
+void FeatureExtractor::applyHammingWindow(std::vector<float>& frame) {
+    std::vector<float> window = getHammingWindow(true);
+    
+    // 应用窗函数
+    for (size_t i = 0; i < frame.size(); ++i) {
+        frame[i] *= window[i % window.size()];
+    }
+}
+
+void FeatureExtractor::fft(std::vector<complex_d>& a, bool invert) {
+    int n = a.size();
+    if (n == 1) return;
+
+    std::vector<complex_d> a0(n / 2), a1(n / 2);
+    for (int i = 0; 2 * i < n; i++) {
+        a0[i] = a[2 * i];
+        a1[i] = a[2 * i + 1];
+    }
+    fft(a0, invert);
+    fft(a1, invert);
+
+    double ang = 2 * M_PI / n * (invert ? -1 : 1);
+    complex_d w(1), wn(std::cos(ang), std::sin(ang));
+    for (int i = 0; 2 * i < n; i++) {
+        a[i] = a0[i] + w * a1[i];
+        a[i + n / 2] = a0[i] - w * a1[i];
+        if (invert) {
+            a[i] /= 2;
+            a[i + n / 2] /= 2;
+        }
+        w *= wn;
+    }
+}
+
+std::vector<float> FeatureExtractor::computePowerSpec(const std::vector<complex_d>& fft_result) {
+    std::vector<float> powerSpec(n_dim_);
+    for (int i = 0; i < n_dim_; ++i) {
+        float real = static_cast<float>(fft_result[i].real());
+        float imag = static_cast<float>(fft_result[i].imag());
+        powerSpec[i] = (real * real + imag * imag) / n_fft_;
+    }
+    return powerSpec;
+}
+
+double FeatureExtractor::hzToMel(double hz) {
+    // 将频率从Hz转换为Mel刻度
+    // 使用标准公式: m = 1127.01048 * ln(1 + f/700)
+    return 1127.01048 * std::log(1.0 + hz / 700.0);
+}
+
+double FeatureExtractor::melToHz(double mel) {
+    // 将Mel刻度转换回Hz
+    // 使用标准公式: f = 700 * (exp(m/1127.01048) - 1)
+    return 700.0 * (std::exp(mel / 1127.01048) - 1.0);
+}
+
+std::vector<double> FeatureExtractor::linspace(double start, double end, int num) {
+    std::vector<double> result(num);
+    double step = (end - start) / (num - 1);
+    
+    for (int i = 0; i < num; ++i) {
+        result[i] = start + i * step;
+    }
+    
+    return result;
+}
+
+std::vector<std::vector<float>> FeatureExtractor::getMelFilterbank() {
+    // 创建Mel滤波器组
+    double nyquist_freq = sample_rate_ / 2.0;
+    
+    // 创建线性频率刻度
+    std::vector<double> fft_freqs = linspace(0.0, nyquist_freq, n_dim_);
+    
+    // 创建Mel刻度边界
+    double low_freq_mel = hzToMel(0.0);
+    double high_freq_mel = hzToMel(nyquist_freq);
+    std::vector<double> mel_points = linspace(low_freq_mel, high_freq_mel, n_filters_ + 2);
+    
+    // 将Mel刻度边界转换回Hz
+    std::vector<double> hz_points(mel_points.size());
+    for (size_t i = 0; i < mel_points.size(); ++i) {
+        hz_points[i] = melToHz(mel_points[i]);
+    }
+    
+    // 计算滤波器组系数
+    std::vector<std::vector<float>> filterbank(n_filters_, std::vector<float>(n_dim_, 0.0f));
+    
+    for (int i = 0; i < n_filters_; ++i) {
+        // 计算三角形滤波器
+        double f_m_minus = hz_points[i];     // 左边界
+        double f_m = hz_points[i + 1];       // 中心
+        double f_m_plus = hz_points[i + 2];  // 右边界
+        
+        for (int j = 0; j < n_dim_; ++j) {
+            double freq = fft_freqs[j];
+            
+            // 左半三角
+            if (freq >= f_m_minus && freq <= f_m) {
+                filterbank[i][j] = static_cast<float>((freq - f_m_minus) / (f_m - f_m_minus));
+            }
+            // 右半三角
+            else if (freq >= f_m && freq <= f_m_plus) {
+                filterbank[i][j] = static_cast<float>((f_m_plus - freq) / (f_m_plus - f_m));
+            }
+        }
+    }
+    
+    return filterbank;
+}
+
 std::vector<std::vector<float>> FeatureExtractor::extractMFCC(const std::vector<float>& audio) {
     if (audio.empty()) {
         return {};
     }
     
+    // 预加重
+    std::vector<float> emphasized = preEmphasis(audio);
+    
     // 计算帧数
     int num_frames = static_cast<int>((audio.size() - n_fft_) / hop_length_) + 1;
-    
-    // 在实际部署中，应使用真实的MFCC提取算法
-    // 这里使用随机值模拟MFCC特征，仅用于演示
-    std::vector<std::vector<float>> mfcc_features(num_frames, std::vector<float>(n_mfcc_));
-    
-    // 创建随机数生成器
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    
-    // 生成随机MFCC特征
-    for (int i = 0; i < num_frames; ++i) {
-        for (int j = 0; j < n_mfcc_; ++j) {
-            mfcc_features[i][j] = dist(gen);
-        }
+    if (num_frames <= 0) {
+        return {};
     }
     
-    // 注意：在实际部署中，此处应使用真实的MFCC提取算法
-    // 例如：
-    // 1. 分帧
-    // 2. 加窗（汉明窗）
-    // 3. 快速傅里叶变换（FFT）
-    // 4. 梅尔滤波器组
-    // 5. 对数运算
-    // 6. 离散余弦变换（DCT）
+    // 获取Mel滤波器组
+    std::vector<std::vector<float>> mel_filterbank = getMelFilterbank();
+    
+    // 创建MFCC特征矩阵
+    std::vector<std::vector<float>> mfcc_features(num_frames, std::vector<float>(n_mfcc_));
+    
+    // 每帧处理
+    for (int i = 0; i < num_frames; ++i) {
+        // 帧起始位置
+        int start = i * hop_length_;
+        int end = std::min(start + n_fft_, static_cast<int>(emphasized.size()));
+        
+        // 提取当前帧
+        std::vector<float> frame(n_fft_, 0.0f);
+        std::copy(emphasized.begin() + start, emphasized.begin() + end, frame.begin());
+        
+        // 应用汉明窗
+        applyHammingWindow(frame);
+        
+        // 执行FFT
+        std::vector<complex_d> fft_input(n_fft_);
+        for (int j = 0; j < n_fft_; ++j) {
+            fft_input[j] = complex_d(frame[j], 0.0);
+        }
+        fft(fft_input, false);
+        
+        // 计算功率谱
+        std::vector<float> power_spec = computePowerSpec(fft_input);
+        
+        // 应用Mel滤波器
+        std::vector<float> mel_energy(n_filters_, 0.0f);
+        for (int j = 0; j < n_filters_; ++j) {
+            for (int k = 0; k < n_dim_; ++k) {
+                mel_energy[j] += power_spec[k] * mel_filterbank[j][k];
+            }
+            // 防止对0或负数取对数
+            mel_energy[j] = std::max(mel_energy[j], 1e-10f);
+            // 取对数
+            mel_energy[j] = std::log(mel_energy[j]);
+        }
+        
+        // 应用离散余弦变换(DCT)提取MFCC
+        for (int j = 0; j < n_mfcc_; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < n_filters_; ++k) {
+                sum += mel_energy[k] * std::cos(M_PI * j * (k + 0.5) / n_filters_);
+            }
+            mfcc_features[i][j] = sum;
+        }
+    }
     
     return mfcc_features;
 }
@@ -360,10 +534,10 @@ std::vector<std::vector<float>> FeatureExtractor::extractFeatures(const std::vec
     // 提取基础MFCC特征
     std::vector<std::vector<float>> mfcc_features = extractMFCC(audio);
     
-    // 为了与现有模型兼容，此处不添加上下文信息
-    // 如果需要上下文特征，可以使用 addContext 方法
+    // 添加上下文特征
+    std::vector<std::vector<float>> context_features = addContext(mfcc_features, context_frames_);
     
-    return mfcc_features;
+    return context_features;
 }
 
 //-----------------------------------------------------------------------------

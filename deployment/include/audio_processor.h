@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <memory>
 #include <cmath>
+#include <complex>
 
 namespace edgevoice {
 
@@ -121,14 +122,14 @@ public:
     std::vector<float> process(const std::vector<float>& audio, int orig_sample_rate);
 
 private:
-    int sample_rate_;
-    int target_sample_rate_;
-    float vad_energy_threshold_;
-    float vad_zcr_threshold_;
-    int frame_length_;
-    int frame_shift_;
-    int min_speech_frames_;
-    int min_silence_frames_;
+    int sample_rate_;            // 输入音频采样率
+    int target_sample_rate_;     // 目标采样率
+    float vad_energy_threshold_; // VAD能量阈值
+    float vad_zcr_threshold_;    // VAD过零率阈值
+    int frame_length_;           // 帧长（样本数）
+    int frame_shift_;            // 帧移（样本数）
+    int min_speech_frames_;      // 最小语音帧数
+    int min_silence_frames_;     // 最小静音帧数
 };
 
 /**
@@ -138,22 +139,24 @@ private:
  */
 class FeatureExtractor {
 public:
+    using complex_d = std::complex<double>;
+
     /**
      * @brief 构造函数
      * 
      * @param sample_rate 采样率
-     * @param frame_length_ms 帧长（毫秒）
-     * @param frame_shift_ms 帧移（毫秒）
-     * @param num_mfcc MFCC特征数量
-     * @param num_mels Mel滤波器组数量
-     * @param fft_size FFT窗口大小
+     * @param n_mfcc MFCC特征数量
+     * @param n_fft FFT窗口大小
+     * @param hop_length 帧移（样本数）
+     * @param context_frames 上下文帧数
      */
-    FeatureExtractor(int sample_rate = 16000,
-                     int frame_length_ms = 25,
-                     int frame_shift_ms = 10,
-                     int num_mfcc = 13,
-                     int num_mels = 40,
-                     int fft_size = 512);
+    FeatureExtractor(
+        int sample_rate = 16000,
+        int n_mfcc = 13,
+        int n_fft = 512,
+        int hop_length = 160,
+        int context_frames = 5
+    );
 
     /**
      * @brief 析构函数
@@ -187,18 +190,31 @@ public:
     std::vector<std::vector<float>> extractFeatures(const std::vector<float>& audio);
 
 private:
-    int sample_rate_;
-    int frame_length_;
-    int frame_shift_;
-    int num_mfcc_;
-    int num_mels_;
-    int fft_size_;
+    int sample_rate_;        // 采样率
+    int n_mfcc_;             // MFCC系数数量
+    int n_fft_;              // FFT大小
+    int hop_length_;         // 帧移
+    int context_frames_;     // 上下文帧数
+    int n_filters_;          // Mel滤波器组数量
+    int n_dim_;              // FFT输出维度 = n_fft/2 + 1
+
+    // 辅助MFCC提取方法
+    std::vector<float> preEmphasis(const std::vector<float>& signal, float coef = 0.97f);
+    void applyHammingWindow(std::vector<float>& frame);
+    std::vector<float> getHammingWindow(bool periodic = true);
+    void fft(std::vector<complex_d>& a, bool invert);
+    std::vector<float> computePowerSpec(const std::vector<complex_d>& fft_result);
+    std::vector<std::vector<float>> getMelFilterbank();
+    double hzToMel(double hz);
+    double melToHz(double mel);
+    std::vector<double> linspace(double start, double end, int num);
 };
 
 /**
  * @brief 标准化音频长度
  * 
  * @param audio 输入音频数据
+ * @param sample_rate 采样率
  * @param target_length 目标长度（秒）
  * @param min_length 最小长度（秒）
  * @return std::vector<float> 标准化后的音频数据
@@ -213,11 +229,12 @@ std::vector<float> standardizeAudioLength(
 /**
  * @brief 从WAV文件加载音频数据
  * 
- * @param filename WAV文件路径
- * @return WAV文件数据结构
+ * @param file_path WAV文件路径
+ * @param target_sample_rate 目标采样率（如果需要重采样）
+ * @return std::pair<std::vector<float>, int> 音频数据和原始采样率
  * @throws std::runtime_error 如果文件不存在或格式不支持
  */
-WavData loadWavFile(const std::string& filename);
+std::pair<std::vector<float>, int> loadWavFile(const std::string& file_path, int target_sample_rate);
 
 } // namespace edgevoice
 
