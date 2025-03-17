@@ -39,6 +39,15 @@ CONFORMER_CONV_KERNEL_SIZE = 31
 CONFORMER_FF_EXPANSION_FACTOR = 4
 CONFORMER_DROPOUT = 0.2
 
+# ASR相关配置
+ASR_MODEL_PATH = os.path.join(MODEL_DIR, "wenet_conformer")
+ASR_CACHE_DIR = os.path.join(MODEL_DIR, "asr_cache")
+ASR_ONNX_PATH = os.path.join(MODEL_DIR, "wenet_conformer.onnx")
+ASR_RESULT_SAVE = True
+ASR_DICT_PATH = os.path.join(ASR_MODEL_PATH, "units.txt")
+ASR_CONF_THRESHOLD = 0.6
+PRECISE_TOTAL_TIMEOUT_MS = 800  # 总超时时间(ms)
+
 # DistilBERT模型本地路径
 DISTILBERT_MODEL_PATH = os.path.join("models", "distilbert-base-uncased")
 
@@ -53,3 +62,57 @@ DATA_DIR = "data"
 MODEL_DIR = "saved_models"  
 os.makedirs(DATA_DIR, exist_ok=True)  
 os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(ASR_CACHE_DIR, exist_ok=True)  # 创建ASR缓存目录
+
+# 新增：ASR配置参数
+# ASR音频处理配置
+ASR_MAX_LENGTH = 50000  # 最大音频长度（帧）
+ASR_MIN_LENGTH = 10  # 最小音频长度（帧）
+ASR_TOKEN_MAX_LENGTH = 200  # 最大标记长度
+ASR_TOKEN_MIN_LENGTH = 1  # 最小标记长度
+
+# ASR VAD配置
+ASR_VAD_ENABLED = True
+ASR_VAD_MODE = 3  # 0-3范围
+ASR_VAD_PADDING_MS = 300
+ASR_SILENCE_THRESHOLD = 0.1
+
+# ASR特征提取配置
+ASR_NUM_MEL_BINS = 80
+ASR_FRAME_LENGTH = 25
+ASR_FRAME_SHIFT = 10
+ASR_USE_SPECAUG = True
+ASR_SPEC_DROPOUT = 0.1
+ASR_TIME_MASK = 2
+ASR_FREQ_MASK = 2
+
+# ASR模型参数
+ASR_MODEL_TYPE = "conformer"  # conformer, transformer
+ASR_NUM_LAYERS = 12
+ASR_NUM_HEADS = 4
+ASR_NUM_DECODER_LAYERS = 6
+ASR_HIDDEN_SIZE = 256
+ASR_DROPOUT = 0.1
+ASR_POS_ENCODING = "rel_pos"  # rel_pos, abs_pos
+ASR_CNN_KERNEL_SIZE = 15
+ASR_ACTIVATION = "swish"  # swish, relu
+
+# ASR推理参数
+ASR_BEAM_SIZE = 10
+ASR_CONFIDENCE_THRESHOLD = 0.6
+ASR_DECODING_METHOD = "attention_rescoring"  # ctc_greedy, ctc_prefix_beam, attention, attention_rescoring
+
+# ASR训练参数
+ASR_BATCH_SIZE = 16
+ASR_MAX_EPOCHS = 120
+ASR_LR = 0.001
+ASR_WEIGHT_DECAY = 0.0001
+ASR_ACCUM_GRAD = 4
+ASR_SAVE_INTERVAL = 10
+
+# 适配Conformer模型的参数
+CONFORMER_LAYERS = 2
+CONFORMER_ATTENTION_HEADS = 4
+CONFORMER_CONV_KERNEL_SIZE = 31
+CONFORMER_FF_EXPANSION_FACTOR = 4
+CONFORMER_DROPOUT = 0.1

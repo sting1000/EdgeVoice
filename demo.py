@@ -1,344 +1,513 @@
-# demo.py  
-import argparse  
-import sounddevice as sd  
-import numpy as np  
-import queue  
-import threading  
-import time  
-import sys  
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+EdgeVoice命令行演示程序
+支持实时麦克风输入和文件处理两种模式
+"""
+
 import os
-import soundfile as sf  
-from inference import IntentInferenceEngine  
-from config import *  
+import sys
+import time
+import argparse
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
+import wave
+import threading
+import json
+from collections import deque
 import librosa
+from pathlib import Path
 
-class AudioStreamer:  
-    def __init__(self, sample_rate=SAMPLE_RATE, buffer_size=MAX_COMMAND_DURATION_S*SAMPLE_RATE):  
-        self.sample_rate = sample_rate  
-        self.buffer_size = buffer_size  
-        self.audio_queue = queue.Queue()  
-        self.audio_buffer = np.zeros(buffer_size, dtype=np.float32)  
-        self.is_active = False  
-        self.stream = None  
-        self.file_mode = False
+# 引入推理引擎
+from inference import IntentInferenceEngine
+from config import *
+
+# 检测PyAudio可用性
+try:
+    import pyaudio
+    PYAUDIO_AVAILABLE = True
+except ImportError:
+    PYAUDIO_AVAILABLE = False
+    print("[警告] PyAudio未安装，将使用sounddevice进行音频处理")
+
+# 检测VAD可用性
+try:
+    import webrtcvad
+    VAD_AVAILABLE = True
+except ImportError:
+    VAD_AVAILABLE = False
+    print("[警告] webrtcvad未安装，语音检测功能将不可用")
+
+# 颜色输出
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    
+    @staticmethod
+    def disable():
+        Colors.HEADER = ''
+        Colors.BLUE = ''
+        Colors.GREEN = ''
+        Colors.YELLOW = ''
+        Colors.RED = ''
+        Colors.ENDC = ''
+        Colors.BOLD = ''
+        Colors.UNDERLINE = ''
+
+# Windows上禁用颜色输出
+if sys.platform.startswith('win'):
+    Colors.disable()
+
+def print_intent(result, show_timing=True):
+    """打印识别结果"""
+    intent = result.get("intent")
+    confidence = result.get("confidence", 0.0)
+    path = result.get("path", "unknown")
+    
+    # 打印意图结果
+    print(f"\n{Colors.BOLD}识别结果:{Colors.ENDC}")
+    print(f"  意图: {Colors.GREEN}{intent}{Colors.ENDC}")
+    print(f"  置信度: {Colors.YELLOW}{confidence:.4f}{Colors.ENDC}")
+    print(f"  处理路径: {Colors.BLUE}{path}{Colors.ENDC}")
+    
+    # 如果是ASR路径，打印转写结果
+    if path == "asr+nlu" or result.get("transcription"):
+        print(f"  转写文本: {Colors.GREEN}{result.get('transcription')}{Colors.ENDC}")
+        if "asr_confidence" in result:
+            print(f"  ASR置信度: {Colors.YELLOW}{result.get('asr_confidence', 0.0):.4f}{Colors.ENDC}")
+    
+    # 打印时间信息
+    if show_timing:
+        preprocessing_time = result.get("preprocessing_time", 0.0)
+        inference_time = result.get("inference_time", 0.0)
+        asr_time = result.get("asr_time", 0.0)
+        total_time = result.get("total_time", 0.0)
         
-    def callback(self, indata, frames, time, status):  
-        """音频流回调函数"""  
-        if status:  
-            print(f"Stream callback status: {status}")  
+        print(f"\n{Colors.BOLD}处理时间:{Colors.ENDC}")
+        print(f"  预处理: {Colors.YELLOW}{preprocessing_time:.2f}ms{Colors.ENDC}")
+        if asr_time:
+            print(f"  ASR: {Colors.YELLOW}{asr_time:.2f}ms{Colors.ENDC}")
+        print(f"  推理: {Colors.YELLOW}{inference_time:.2f}ms{Colors.ENDC}")
+        print(f"  总计: {Colors.BOLD}{Colors.YELLOW}{total_time:.2f}ms{Colors.ENDC}")
+
+class MicrophoneStream:
+    """麦克风流处理类"""
+    
+    def __init__(self, rate=16000, chunk_size=1024, device=None):
+        self.rate = rate
+        self.chunk_size = chunk_size
+        self.device = device
+        self.stream = None
+        self.frames = deque(maxlen=100)  # 存储最近的音频帧
+        self.stopped = False
+        self.vad = None
+        self.voice_detected = False
+        self.silence_frames = 0
         
-        # 将新的音频数据添加到队列  
-        self.audio_queue.put(indata.copy())  
+        # 如果VAD可用，初始化
+        if VAD_AVAILABLE:
+            self.vad = webrtcvad.Vad(VAD_MODE)
     
-    def update_buffer(self):  
-        """从队列更新缓冲区"""  
-        while self.is_active:  
-            try:  
-                # 非阻塞获取  
-                new_audio = self.audio_queue.get(block=False)  
-                
-                # 移动缓冲区并添加新音频  
-                new_size = new_audio.shape[0]  
-                self.audio_buffer[:-new_size] = self.audio_buffer[new_size:]  
-                self.audio_buffer[-new_size:] = new_audio.flatten()  
-                
-            except queue.Empty:  
-                # 队列为空，短暂休眠  
-                time.sleep(0.01)  
-    
-    def get_audio(self):  
-        """获取当前缓冲区中的音频"""  
-        return self.audio_buffer.copy()  
-    
-    def load_from_file(self, file_path):
-        """从音频文件加载数据"""
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"音频文件未找到: {file_path}")
-            
-        try:
-            print(f"正在从文件加载音频: {file_path}")
-            audio_data, file_sample_rate = sf.read(file_path)
-            
-            # 处理多声道情况，转换为单声道
-            if len(audio_data.shape) > 1:
-                audio_data = np.mean(audio_data, axis=1)
-                
-            # 如果采样率不匹配，进行重采样
-            if file_sample_rate != self.sample_rate:
-                print(f"警告: 文件采样率 ({file_sample_rate}Hz) 与系统设置 ({self.sample_rate}Hz) 不匹配，进行重采样")
-                # 使用librosa进行重采样
-                audio_data = librosa.resample(audio_data, orig_sr=file_sample_rate, target_sr=self.sample_rate)
-            
-            # 调整数据类型为float32
-            if audio_data.dtype != np.float32:
-                audio_data = audio_data.astype(np.float32)
-            
-            # 添加音频长度验证
-            audio_duration = len(audio_data) / self.sample_rate
-            if audio_duration > MAX_COMMAND_DURATION_S:
-                print(f"警告: 音频长度 ({audio_duration:.2f}s) 超过最大命令长度 ({MAX_COMMAND_DURATION_S}s)")
-            elif audio_duration < 0.5:  # 小于0.5秒的音频可能太短
-                print(f"警告: 音频过短 ({audio_duration:.2f}s)，可能不足以包含完整命令")
-            
-            # 使用音频预处理器获取有效语音段
-            from audio_preprocessing import AudioPreprocessor
-            preprocessor = AudioPreprocessor(sample_rate=self.sample_rate)
-            
-            # 检测语音活动区域
-            speech_segments = preprocessor.detect_voice_activity(audio_data)
-            
-            if speech_segments:
-                # 如果检测到语音段，合并所有语音段
-                processed_audio = np.array([])
-                for start, end in speech_segments:
-                    # 转换帧索引到样本索引
-                    frame_shift = int(FRAME_SHIFT_MS * self.sample_rate / 1000)
-                    frame_length = int(FRAME_LENGTH_MS * self.sample_rate / 1000)
-                    sample_start = start * frame_shift
-                    sample_end = min(end * frame_shift + frame_length, len(audio_data))
-                    processed_audio = np.append(processed_audio, audio_data[sample_start:sample_end])
-                
-                print(f"检测到语音段，长度从 {len(audio_data)} 减少到 {len(processed_audio)} 采样点")
-                audio_data = processed_audio
-            else:
-                print("未检测到明显的语音段，使用原始音频")
-            
-            # 智能处理音频长度
-            if len(audio_data) > self.buffer_size:
-                # 如果音频仍然太长，优先保留中间部分
-                # 这样比简单截取末尾更合理，因为语音命令通常在中间部分
-                start = (len(audio_data) - self.buffer_size) // 2
-                self.audio_buffer = audio_data[start:start+self.buffer_size]
-                print(f"音频超出缓冲区大小，截取中间 {self.buffer_size} 采样点")
-            else:
-                # 居中放置音频，而不是放在末尾
-                # 这对于特征提取和VAD更为合理
-                self.audio_buffer = np.zeros(self.buffer_size, dtype=np.float32)
-                start_pos = (self.buffer_size - len(audio_data)) // 2
-                self.audio_buffer[start_pos:start_pos+len(audio_data)] = audio_data
-                print(f"音频小于缓冲区大小，居中放置")
-            
-            print(f"音频文件加载成功，原始长度: {len(audio_data)} 采样点，持续时间: {audio_duration:.2f}s")
-            return True
-            
-        except Exception as e:
-            print(f"加载音频文件时出错: {e}")
-            return False
-    
-    def start(self, file_path=None):  
-        """启动音频流或加载文件"""  
-        self.is_active = True
+    def start(self):
+        """开始麦克风流"""
+        self.stopped = False
         
-        if file_path:
-            # 文件模式
-            self.file_mode = True
-            return self.load_from_file(file_path)
+        # 根据可用性选择音频处理库
+        if PYAUDIO_AVAILABLE:
+            self._start_pyaudio()
         else:
-            # 麦克风流模式
-            self.file_mode = False
-            
-            # 启动更新缓冲区的线程  
-            self.buffer_thread = threading.Thread(target=self.update_buffer)  
-            self.buffer_thread.daemon = True  
-            self.buffer_thread.start()  
-            
-            # 启动音频流  
-            self.stream = sd.InputStream(  
-                samplerate=self.sample_rate,  
-                channels=1,  
-                callback=self.callback  
-            )  
-            self.stream.start()
-            return True
-    
-    def stop(self):  
-        """停止音频流"""  
-        if self.is_active and not self.file_mode:  
-            self.is_active = False  
-            
-            if self.stream:  
-                self.stream.stop()  
-                self.stream.close()  
-            
-            # 等待缓冲区线程结束  
-            if hasattr(self, 'buffer_thread') and self.buffer_thread.is_alive():  
-                self.buffer_thread.join(timeout=1.0)  
-
-class IntentDemo:  
-    def __init__(self, fast_model_path, precise_model_path=None):  
-        # 初始化推理引擎  
-        self.engine = IntentInferenceEngine(fast_model_path, precise_model_path)  
+            self._start_sounddevice()
         
-        # 初始化音频流  
-        self.audio_streamer = AudioStreamer()  
+        # 启动处理线程
+        self.thread = threading.Thread(target=self._process_frames)
+        self.thread.daemon = True
+        self.thread.start()
         
-        # 状态标志  
-        self.running = False  
-        self.wakeword_detected = False  
-        self.last_intent_time = 0  
-        self.cooldown_period = 2.0  # 冷却时间，避免连续识别  
+        return self
     
-    def simulate_wakeword_detection(self):  
-        """模拟唤醒词检测(在实际场景中应替换为真实的唤醒词检测)"""  
-        while self.running:  
-            user_input = input("输入'wake'来模拟唤醒，或'q'退出: ")  
-            if user_input.lower() == 'wake':  
-                print("检测到唤醒词! 请说出你的命令...")  
-                self.wakeword_detected = True  
-                self.last_intent_time = time.time()  
-            elif user_input.lower() == 'q':  
-                self.running = False  
-            time.sleep(0.1)  
+    def _start_pyaudio(self):
+        """使用PyAudio启动麦克风流"""
+        self.audio = pyaudio.PyAudio()
+        self.stream = self.audio.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=self.rate,
+            input=True,
+            frames_per_buffer=self.chunk_size,
+            input_device_index=self.device,
+            stream_callback=self._pyaudio_callback
+        )
+        self.stream.start_stream()
     
-    def process_intent(self):  
-        """意图处理循环"""  
-        while self.running:  
-            # 如果检测到唤醒词且冷却期已过  
-            if self.wakeword_detected and (time.time() - self.last_intent_time) > self.cooldown_period:  
-                # 获取当前音频  
-                audio = self.audio_streamer.get_audio()  
+    def _pyaudio_callback(self, in_data, frame_count, time_info, status):
+        """PyAudio回调函数"""
+        if not self.stopped:
+            self.frames.append(in_data)
+        return None, pyaudio.paContinue
+    
+    def _start_sounddevice(self):
+        """使用sounddevice启动麦克风流"""
+        def callback(indata, frames, time, status):
+            """sounddevice回调函数"""
+            if status:
+                print(f"[警告] {status}")
+            if not self.stopped:
+                # 将float32转换为int16
+                audio_int16 = (indata * 32767).astype(np.int16)
+                self.frames.append(audio_int16.tobytes())
+        
+        self.stream = sd.InputStream(
+            samplerate=self.rate,
+            blocksize=self.chunk_size,
+            channels=1,
+            dtype='float32',
+            callback=callback,
+            device=self.device
+        )
+        self.stream.start()
+    
+    def _process_frames(self):
+        """处理音频帧，进行语音检测"""
+        while not self.stopped:
+            if self.vad and len(self.frames) > 0:
+                # 只在需要时取出一帧进行VAD
+                frame = self.frames[-1]
+                is_speech = self.vad.is_speech(frame, self.rate)
                 
-                # 预测意图  
-                result = self.engine.process_audio_stream(audio)  
-                
-                # 输出结果  
-                intent, confidence, preprocess_time, inference_time, path = result
-                total_time = preprocess_time + inference_time
-                
-                print(f"\n检测到意图: {intent}")  
-                print(f"置信度: {confidence:.4f}")  
-                print(f"使用路径: {path}")  
-                print(f"处理时间: {total_time*1000:.2f}ms")  
-                
-                # 根据意图类型执行相应操作  
-                if intent in ['TAKE_PHOTO', 'START_RECORDING', 'STOP_RECORDING', 'CAPTURE_SCAN_QR']:  
-                    print(f"执行相机操作: {intent}")  
-                
-                # 重置状态  
-                self.wakeword_detected = False  
-                self.last_intent_time = time.time()  
+                if is_speech:
+                    if not self.voice_detected:
+                        print("\r检测到语音...   ", end='', flush=True)
+                    self.voice_detected = True
+                    self.silence_frames = 0
+                else:
+                    if self.voice_detected:
+                        self.silence_frames += 1
+                        if self.silence_frames > int(self.rate / self.chunk_size * (VAD_PADDING_DURATION_MS / 1000)):
+                            self.voice_detected = False
+                            print("\r等待语音输入...", end='', flush=True)
             
-            time.sleep(0.1)  
+            time.sleep(0.01)  # 减少CPU使用率
     
-    def process_file(self, file_path):
-        """处理单个音频文件"""
-        print(f"正在处理文件: {file_path}")
-        
-        # 加载音频文件
-        if not self.audio_streamer.start(file_path):
-            print("文件加载失败，跳过处理")
-            return False
-        
-        # 获取音频数据
-        audio = self.audio_streamer.get_audio()
-        
-        # 预测意图
-        print("正在处理音频...")
-        start_time = time.time()
-        result = self.engine.process_audio_stream(audio)
-        
-        # 输出结果
-        intent, confidence, preprocess_time, inference_time, path = result
-        total_time = preprocess_time + inference_time
-        
-        print(f"\n文件: {os.path.basename(file_path)}")
-        print(f"检测到意图: {intent}")
-        print(f"置信度: {confidence:.4f}")
-        print(f"使用路径: {path}")
-        print(f"处理时间: {total_time*1000:.2f}ms")
-        print(f"总处理时间: {(time.time() - start_time)*1000:.2f}ms")
-        
-        return True
-    
-    def batch_process(self, directory):
-        """批量处理目录中的所有音频文件"""
-        if not os.path.isdir(directory):
-            print(f"错误: '{directory}' 不是有效目录")
-            return
-        
-        # 支持的音频格式
-        audio_extensions = ['.wav', '.mp3', '.flac', '.ogg']
-        
-        # 查找目录中的所有音频文件
-        audio_files = []
-        for root, _, files in os.walk(directory):
-            for file in files:
-                if any(file.lower().endswith(ext) for ext in audio_extensions):
-                    audio_files.append(os.path.join(root, file))
-        
-        if not audio_files:
-            print(f"在 '{directory}' 中没有找到音频文件")
-            return
-        
-        print(f"找到 {len(audio_files)} 个音频文件进行处理")
-        
-        # 处理每个文件
-        success_count = 0
-        for i, file_path in enumerate(audio_files, 1):
-            print(f"\n[{i}/{len(audio_files)}] 处理文件: {file_path}")
-            if self.process_file(file_path):
-                success_count += 1
-        
-        print(f"\n批处理完成: 成功处理 {success_count}/{len(audio_files)} 个文件")
-    
-    def run(self, use_file=False, file_path=None, batch_mode=False):  
-        """运行演示"""  
-        self.running = True  
-        
-        if use_file:
-            if batch_mode:
-                # 批处理模式
-                print(f"开始批处理目录: {file_path}")
-                self.batch_process(file_path)
-            else:
-                # 单文件模式
-                self.process_file(file_path)
+    def get_audio_data(self, duration_seconds=None):
+        """获取指定时长的音频数据"""
+        if duration_seconds is None:
+            # 默认返回所有缓存的帧
+            frames_list = list(self.frames)
+            self.frames.clear()
         else:
-            # 实时麦克风模式
-            print("启动音频流...")  
-            self.audio_streamer.start()  
+            # 计算需要多少帧
+            frames_needed = int(duration_seconds * self.rate / self.chunk_size)
+            frames_list = []
             
-            try:  
-                # 启动唤醒词检测线程  
-                wakeword_thread = threading.Thread(target=self.simulate_wakeword_detection)  
-                wakeword_thread.daemon = True  
-                wakeword_thread.start()  
-                
-                # 启动意图处理  
-                self.process_intent()  
-                
-            except KeyboardInterrupt:  
-                print("\n用户中断，正在关闭...")  
-            finally:  
-                # 清理资源  
-                self.running = False  
-                self.audio_streamer.stop()  
-                
-                # 等待线程结束  
-                if 'wakeword_thread' in locals() and wakeword_thread.is_alive():  
-                    wakeword_thread.join(timeout=1.0)  
+            # 获取最近的N帧
+            i = 0
+            while i < frames_needed and len(self.frames) > 0:
+                frames_list.append(self.frames.popleft())
+                i += 1
         
-        print("演示已结束")  
+        # 拼接所有帧
+        audio_data = b''.join(frames_list)
+        
+        # 将字节转换为numpy数组
+        if PYAUDIO_AVAILABLE:
+            # PyAudio使用Int16格式
+            audio_np = np.frombuffer(audio_data, dtype=np.int16)
+        else:
+            # sounddevice已经是float32
+            audio_np = np.frombuffer(audio_data, dtype=np.int16)
+        
+        # 转换为float32，范围[-1, 1]
+        audio_float = audio_np.astype(np.float32) / 32767
+        
+        return audio_float
+    
+    def stop(self):
+        """停止麦克风流"""
+        self.stopped = True
+        
+        if self.stream:
+            if PYAUDIO_AVAILABLE:
+                self.stream.stop_stream()
+                self.stream.close()
+                self.audio.terminate()
+            else:
+                self.stream.stop()
+                self.stream.close()
+        
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
 
-if __name__ == "__main__":
-    # 命令行参数解析
-    parser = argparse.ArgumentParser(description='EdgeVoice语音意图识别演示')
-    parser.add_argument('--fast_model', type=str, required=True, help='快速分类器模型路径')
-    parser.add_argument('--precise_model', type=str, default=None, help='精确分类器模型路径（可选）')
-    parser.add_argument('--use_file', action='store_true', help='从文件加载音频，而不是实时录制')
-    parser.add_argument('--file_path', type=str, default=None, help='音频文件路径（--use_file为True时需要）')
-    parser.add_argument('--batch_mode', action='store_true', help='批处理模式（处理目录中的所有音频文件）')
-    parser.add_argument('--use_onnx', action='store_true', help='使用ONNX模型进行推理（暂不支持）')
+def process_audio_file(filepath, engine, use_asr=True, save_output=False, output_dir=None):
+    """处理音频文件"""
+    
+    if not os.path.exists(filepath):
+        print(f"文件不存在: {filepath}")
+        return
+    
+    print(f"处理文件: {filepath}")
+    
+    # 获取文件名（不带路径和扩展名）
+    filename = os.path.basename(filepath)
+    filename_no_ext = os.path.splitext(filename)[0]
+    
+    # 处理音频并预测
+    result = engine.process_audio_file(filepath, use_asr=use_asr)
+    
+    # 打印结果
+    print_intent(result)
+    
+    # 保存结果
+    if save_output and output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        result_filename = os.path.join(output_dir, f"{filename_no_ext}_result.json")
+        
+        with open(result_filename, 'w', encoding='utf-8') as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        
+        print(f"结果已保存到: {result_filename}")
+    
+    return result
+
+def process_directory(dirpath, engine, use_asr=True, save_output=False, output_dir=None, recursive=False):
+    """处理目录中的所有音频文件"""
+    if not os.path.isdir(dirpath):
+        print(f"目录不存在: {dirpath}")
+        return
+    
+    # 支持的音频格式
+    audio_extensions = {'.wav', '.mp3', '.flac', '.ogg'}
+    
+    # 设置输出目录
+    if save_output and not output_dir:
+        output_dir = os.path.join(dirpath, "results")
+    
+    # 搜索文件
+    if recursive:
+        files = [str(f) for f in Path(dirpath).rglob('*') if f.suffix.lower() in audio_extensions]
+    else:
+        files = [os.path.join(dirpath, f) for f in os.listdir(dirpath) 
+                if os.path.isfile(os.path.join(dirpath, f)) and os.path.splitext(f)[1].lower() in audio_extensions]
+    
+    if not files:
+        print(f"未找到音频文件: {dirpath}")
+        return
+    
+    # 处理每个文件
+    results = {}
+    for i, file in enumerate(files):
+        print(f"\n处理文件 [{i+1}/{len(files)}]: {file}")
+        result = process_audio_file(file, engine, use_asr, save_output, output_dir)
+        results[file] = result
+    
+    # 打印总结
+    print(f"\n总结: 已处理 {len(files)} 个文件")
+    return results
+
+def process_microphone(engine, input_device=None, use_asr=True, silence_threshold=SILENCE_THRESHOLD, min_duration=1.0):
+    """从麦克风实时处理语音"""
+    print("\n初始化麦克风...")
+    
+    # 设置采样率和块大小
+    sample_rate = TARGET_SAMPLE_RATE
+    chunk_size = int(sample_rate * VAD_FRAME_DURATION_MS / 1000)  # 与VAD匹配的帧大小
+    
+    # 初始化数据
+    audio_buffer = np.array([], dtype=np.float32)
+    is_recording = False
+    silence_count = 0
+    start_time = None
+    
+    # 实时音频处理参数
+    silence_frames_threshold = int(sample_rate / chunk_size * (MIN_SILENCE_DURATION_MS / 1000))
+    min_frames_threshold = int(sample_rate / chunk_size * (min_duration))
+    
+    # 创建麦克风流
+    stream = MicrophoneStream(rate=sample_rate, chunk_size=chunk_size, device=input_device)
+    stream.start()
+    
+    try:
+        print("\r等待语音输入...", end='', flush=True)
+        
+        while True:
+            # 检测键盘输入（退出）
+            if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                line = input()
+                if line.strip().lower() in ['q', 'quit', 'exit']:
+                    break
+            
+            # 检测语音活动
+            if stream.voice_detected and not is_recording:
+                is_recording = True
+                start_time = time.time()
+                audio_buffer = np.array([], dtype=np.float32)
+                print("\r录音中...        ", end='', flush=True)
+                silence_count = 0
+            
+            # 如果是录音状态，则收集音频数据
+            if is_recording:
+                # 获取最新的音频数据
+                new_audio = stream.get_audio_data(0.1)  # 获取100ms的数据
+                
+                if len(new_audio) > 0:
+                    audio_buffer = np.append(audio_buffer, new_audio)
+                    
+                    # 检测静音
+                    if not stream.voice_detected:
+                        silence_count += 1
+                        
+                        # 如果静音持续足够长，结束录音
+                        if silence_count >= silence_frames_threshold:
+                            duration = time.time() - start_time
+                            
+                            # 确保录音时长至少为1秒
+                            if duration >= min_duration:
+                                print("\r处理中...        ", end='', flush=True)
+                                
+                                # 处理收集到的音频
+                                result = engine.process_audio_stream(audio_buffer, use_asr=use_asr)
+                                
+                                # 打印结果
+                                print_intent(result)
+                                
+                                # 重置状态
+                                is_recording = False
+                                audio_buffer = np.array([], dtype=np.float32)
+                                print("\r等待语音输入...", end='', flush=True)
+                    else:
+                        # 如果检测到语音，重置静音计数
+                        silence_count = 0
+            
+            # 短暂休息，减少CPU使用
+            time.sleep(0.01)
+            
+    except KeyboardInterrupt:
+        print("\n\n退出...")
+    except Exception as e:
+        print(f"\n错误: {e}")
+    finally:
+        stream.stop()
+
+def list_audio_devices():
+    """列出可用的音频设备"""
+    print("\n可用的音频设备:")
+    
+    if PYAUDIO_AVAILABLE:
+        # 使用PyAudio列出设备
+        p = pyaudio.PyAudio()
+        info = p.get_host_api_info_by_index(0)
+        numdevices = info.get('deviceCount')
+        
+        for i in range(numdevices):
+            device_info = p.get_device_info_by_host_api_device_index(0, i)
+            if device_info.get('maxInputChannels') > 0:
+                print(f"  ID {i}: {device_info.get('name')}")
+        
+        p.terminate()
+    else:
+        # 使用sounddevice列出设备
+        devices = sd.query_devices()
+        for i, device in enumerate(devices):
+            if device['max_input_channels'] > 0:
+                print(f"  ID {i}: {device['name']}")
+
+def main():
+    """主函数"""
+    parser = argparse.ArgumentParser(description="EdgeVoice命令行演示程序")
+    parser.add_argument("--fast_model", type=str, default=os.path.join(MODELS_DIR, "fast_model.pt"),
+                        help="快速分类器模型路径")
+    parser.add_argument("--precise_model", type=str, default=os.path.join(MODELS_DIR, "precise_model.pt"),
+                        help="精确分类器模型路径")
+    parser.add_argument("--asr_model", type=str, default=ASR_MODEL_PATH,
+                        help="ASR模型路径")
+    parser.add_argument("--asr_dict", type=str, default=ASR_DICT_PATH,
+                        help="ASR字典文件路径")
+    parser.add_argument("--mode", type=str, choices=["file", "mic", "dir"], default="mic",
+                        help="运行模式:file(处理文件),mic(麦克风输入),dir(处理目录)")
+    parser.add_argument("--input", type=str, help="输入文件或目录路径")
+    parser.add_argument("--output", type=str, help="结果输出目录")
+    parser.add_argument("--save", action="store_true", help="保存处理结果")
+    parser.add_argument("--device", type=int, help="麦克风设备ID")
+    parser.add_argument("--list_devices", action="store_true", help="列出可用的音频设备")
+    parser.add_argument("--threshold", type=float, default=FAST_CONFIDENCE_THRESHOLD,
+                        help=f"快速分类器置信度阈值(默认:{FAST_CONFIDENCE_THRESHOLD})")
+    parser.add_argument("--asr_threshold", type=float, default=ASR_CONFIDENCE_THRESHOLD,
+                        help=f"ASR置信度阈值(默认:{ASR_CONFIDENCE_THRESHOLD})")
+    parser.add_argument("--recursive", action="store_true", help="递归处理子目录中的文件")
+    parser.add_argument("--disable_asr", action="store_true", help="禁用ASR处理路径")
+    parser.add_argument("--save_asr_results", action="store_true", help="保存ASR中间结果")
     
     args = parser.parse_args()
     
-    # 验证参数
-    if args.use_file and not args.file_path and not args.batch_mode:
-        parser.error("使用--use_file需要指定--file_path或启用--batch_mode")
+    # 列出设备并退出
+    if args.list_devices:
+        list_audio_devices()
+        return
     
-    if args.use_onnx:
-        print("ONNX模型推理功能暂未实现，将使用PyTorch模型进行推理")
+    # 检查快速模型路径是否存在
+    if not os.path.exists(args.fast_model):
+        print(f"错误: 快速分类器模型文件不存在: {args.fast_model}")
+        return
     
-    # 初始化演示
-    demo = IntentDemo(args.fast_model, args.precise_model)
-    demo.run(use_file=args.use_file, file_path=args.file_path, batch_mode=args.batch_mode)
+    # 如果选择了文件或目录模式，但没有提供输入
+    if args.mode in ["file", "dir"] and not args.input:
+        print(f"错误: {args.mode}模式需要提供--input参数")
+        return
+    
+    # 加载推理引擎
+    print(f"加载推理引擎...")
+    
+    # 检查精确模型是否存在
+    precise_model_path = None
+    if args.precise_model and os.path.exists(args.precise_model):
+        precise_model_path = args.precise_model
+    
+    # 检查ASR模型是否存在
+    asr_model_path = None
+    asr_dict_path = None
+    if not args.disable_asr:
+        if args.asr_model and os.path.exists(args.asr_model):
+            asr_model_path = args.asr_model
+        if args.asr_dict and os.path.exists(args.asr_dict):
+            asr_dict_path = args.asr_dict
+    
+    # 初始化推理引擎
+    engine = IntentInferenceEngine(
+        fast_model_path=args.fast_model,
+        precise_model_path=precise_model_path,
+        asr_model_path=asr_model_path,
+        asr_dict_path=asr_dict_path,
+        fast_confidence_threshold=args.threshold,
+        asr_confidence_threshold=args.asr_threshold,
+        save_asr_results=args.save_asr_results
+    )
+    
+    use_asr = not args.disable_asr
+    
+    # 根据模式运行
+    if args.mode == "file":
+        process_audio_file(args.input, engine, use_asr, args.save, args.output)
+    elif args.mode == "dir":
+        process_directory(args.input, engine, use_asr, args.save, args.output, args.recursive)
+    else:  # mic模式
+        # 在Windows上，select模块只适用于套接字，因此我们需要特殊处理
+        if sys.platform.startswith('win'):
+            global select
+            class DummySelect:
+                def select(self, *args, **kwargs):
+                    return [], [], []
+            select = DummySelect()
+        else:
+            import select
+        
+        process_microphone(engine, args.device, use_asr)
+
+if __name__ == "__main__":
+    main()
