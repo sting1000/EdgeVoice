@@ -65,29 +65,82 @@ class IntentInferenceEngine:
         
     def _load_fast_model(self, model_path):  
         """Load first-level fast classifier model"""  
-        # 创建与特征维度匹配的模型（MFCC+Delta+Delta2特征，共39维）
-        input_size = 39
-        model = FastIntentClassifier(input_size=input_size)  
-        
         try:
-            # 尝试加载模型权重
-            model.load_state_dict(torch.load(model_path, map_location=self.device))
+            # 尝试加载包含模型和标签的字典
+            checkpoint = torch.load(model_path, map_location=self.device)
+            
+            # 检查是否是新格式（包含model_state_dict和intent_labels）
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint and 'intent_labels' in checkpoint:
+                # 这是新格式，包含标签映射
+                self.intent_classes = checkpoint['intent_labels']
+                print(f"从模型文件加载意图标签: {self.intent_classes}")
+                
+                # 如果有input_size，读取它
+                input_size = checkpoint.get('input_size', 39)
+                
+                # 创建与特征维度匹配的模型
+                model = FastIntentClassifier(input_size=input_size, num_classes=len(self.intent_classes))
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                # 旧格式，只包含模型权重，使用配置中的标签
+                print("使用旧格式加载模型，标签从配置文件获取")
+                input_size = 39 # 默认特征维度（MFCC+Delta+Delta2，共39维）
+                model = FastIntentClassifier(input_size=input_size)
+                
+                try:
+                    # 尝试加载模型权重
+                    model.load_state_dict(checkpoint)
+                except Exception as e:
+                    print(f"加载模型时出现错误：{e}")
+                    print(f"尝试使用兼容模式加载...")
+                    # 对于从旧结构迁移到新Conformer结构的模型，使用严格=False
+                    model.load_state_dict(checkpoint, strict=False)
+                
+                self.intent_classes = INTENT_CLASSES
         except Exception as e:
-            print(f"加载模型时出现错误：{e}")
-            print(f"尝试使用兼容模式加载...")
-            # 对于从旧结构迁移到新Conformer结构的模型，使用严格=False
-            model.load_state_dict(torch.load(model_path, map_location=self.device), strict=False)
+            print(f"加载模型失败：{e}")
+            print("使用默认标签和模型结构")
+            input_size = 39
+            model = FastIntentClassifier(input_size=input_size)
+            self.intent_classes = INTENT_CLASSES
         
-        model = model.to(self.device)  
-        model.eval()  
+        model = model.to(self.device)
+        model.eval()
+        
+        print(f"意图类别标签: {self.intent_classes}")
         return model  
     
     def _load_precise_model(self, model_path):  
         """Load second-level precise classifier model"""  
-        model = PreciseIntentClassifier()  
-        model.load_state_dict(torch.load(model_path, map_location=self.device))  
-        model = model.to(self.device)  
-        model.eval()  
+        try:
+            # 尝试加载包含模型和标签的字典
+            checkpoint = torch.load(model_path, map_location=self.device)
+            
+            # 检查是否是新格式（包含model_state_dict和intent_labels）
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint and 'intent_labels' in checkpoint:
+                # 这是新格式，包含标签映射
+                # 注意：我们不覆盖self.intent_classes，因为在这个架构中，两个模型应该共享相同的标签映射
+                precise_labels = checkpoint['intent_labels']
+                
+                # 检查是否与快速分类器标签一致
+                if set(precise_labels) != set(self.intent_classes):
+                    print(f"警告: 精确分类器标签与快速分类器标签不一致！")
+                    print(f"快速分类器标签: {self.intent_classes}")
+                    print(f"精确分类器标签: {precise_labels}")
+                
+                model = PreciseIntentClassifier(num_classes=len(precise_labels))
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                # 旧格式，只包含模型权重
+                model = PreciseIntentClassifier()
+                model.load_state_dict(checkpoint)
+        except Exception as e:
+            print(f"加载精确分类器失败：{e}")
+            print("使用默认模型结构")
+            model = PreciseIntentClassifier()
+        
+        model = model.to(self.device)
+        model.eval()
         return model  
     
     def preprocess_audio(self, audio):  

@@ -7,7 +7,7 @@ import torch.optim as optim
 import numpy as np  
 import matplotlib.pyplot as plt
 from tqdm import tqdm  
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.metrics import classification_report, accuracy_score  
 from transformers import DistilBertTokenizer
 import time
 import random
@@ -16,7 +16,7 @@ from config import *
 # from data_utils import prepare_dataloader  
 from augmented_dataset import prepare_augmented_dataloader, standardize_audio_length
 from models.fast_classifier import FastIntentClassifier  
-from models.precise_classifier import PreciseIntentClassifier
+from models.precise_classifier import PreciseIntentClassifier  
 import librosa
 import torch.onnx
 
@@ -109,135 +109,123 @@ def process_audio_for_precise(audio, sr, tokenizer, transcript=None):
 
 def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_EPOCHS, 
                     augment=True, augment_prob=0.5, use_cache=True, seed=42):
-    """训练一级快速分类器（支持数据增强）"""
-    # 设置随机种子
+    """训练快速分类器模型"""
     set_seed(seed)
-
-    # 设置设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}")
-
-    print("准备数据...")  
-    # 使用增强版数据加载器
-    train_loader, intent_labels = prepare_augmented_dataloader(
-        annotation_file=annotation_file,
-        data_dir=data_dir,
-        batch_size=BATCH_SIZE,
-        feature_extractor=lambda audio, sr, **kwargs: extract_features(audio, sr),  # 添加feature_extractor
-        augment=augment, 
+    
+    # 定义特征提取器
+    def feature_extractor(audio, sr, **kwargs):
+        audio = standardize_audio_length(audio, sr)
+        # 提取MFCC特征和动态特征
+        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
+        delta_mfccs = librosa.feature.delta(mfccs)
+        delta2_mfccs = librosa.feature.delta(mfccs, order=2)
+        features = np.concatenate([mfccs, delta_mfccs, delta2_mfccs], axis=0)
+        return features.T  # (time, features) 格式，不含上下文
+    
+    # 准备数据加载器
+    train_loader, train_labels = prepare_augmented_dataloader(
+        annotation_file=annotation_file, 
+        data_dir=data_dir, 
+        feature_extractor=feature_extractor,
+        batch_size=BATCH_SIZE, 
+        augment=augment,
         augment_prob=augment_prob,
         use_cache=use_cache,
-        shuffle=True
+        seed=seed
     )
     
-    # 获取输入特征大小
-    batch = next(iter(train_loader))
-    features = batch['features']
-    print(f"特征形状: {features.shape}")
+    # 创建模型（MFCC+Delta+Delta2特征，共39维）
+    input_size = 39
+    model = FastIntentClassifier(input_size=input_size, num_classes=len(train_labels))
+    model = model.to(DEVICE)  
     
-    # 确保特征维度正确
-    if features.dim() == 2:  # (batch_size, feature_dim)
-        input_size = features.size(1)
-    elif features.dim() == 3:  # (batch_size, seq_len, feature_dim)
-        input_size = features.size(2)
-    else:
-        raise ValueError(f"特征维度错误: {features.dim()}, 形状: {features.shape}")
-    
-    num_classes = len(intent_labels)
-    
-    print(f"创建Conformer模型(输入大小: {input_size}, 隐藏大小: {FAST_MODEL_HIDDEN_SIZE}, 类别数: {num_classes})...")  
-    print(f"  - 层数: {CONFORMER_LAYERS}")
-    print(f"  - 注意力头数: {CONFORMER_ATTENTION_HEADS}")
-    print(f"  - 卷积核大小: {CONFORMER_CONV_KERNEL_SIZE}")
-    print(f"  - 前馈网络扩展因子: {CONFORMER_FF_EXPANSION_FACTOR}")
-    model = FastIntentClassifier(input_size=input_size, hidden_size=FAST_MODEL_HIDDEN_SIZE, num_classes=num_classes)  
-    model = model.to(device)  
-    
-    # 损失函数和优化器  
+    # 定义损失函数和优化器
     criterion = nn.CrossEntropyLoss()  
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)  
     
-    # 记录训练历史  
+    # 训练历史记录
     history = {
         'train_loss': [],
         'train_acc': []
     }
     
-    # 训练循环  
-    print("开始训练...")  
+    # 开始训练
+    print(f"开始训练快速分类器模型...")
+    print(f"训练数据大小: {len(train_loader.dataset)}")
+    print(f"意图标签: {train_labels}")
+    print(f"数据增强: {'已启用' if augment else '已禁用'} (概率: {augment_prob})")
+    
     start_time = time.time()
     
     for epoch in range(num_epochs):  
+        epoch_start = time.time()
         model.train()  
-        running_loss = 0.0  
-        correct = 0
-        total = 0
         
-        # 使用tqdm进度条
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
         
-        for batch in progress_bar:  
-            # 准备数据（适配新的数据结构）
-            inputs = batch['features'].to(device)
-            labels = batch['label'].to(device)
-            
-            # 确保输入形状正确 - 如果是2D张量，转换为3D
-            if inputs.dim() == 2:
-                # 添加序列维度 (batch_size, feature_dim) -> (batch_size, 1, feature_dim)
-                inputs = inputs.unsqueeze(1)
-            
-            # 梯度清零  
-            optimizer.zero_grad()  
+        # 训练循环
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+            features = batch['features'].to(DEVICE)
+            labels = batch['label'].to(DEVICE)
             
             # 前向传播  
-            outputs = model(inputs)  
+            outputs = model(features)  
             loss = criterion(outputs, labels)  
             
             # 反向传播和优化  
+            optimizer.zero_grad()
             loss.backward()  
             optimizer.step()  
             
-            # 统计  
-            running_loss += loss.item()  
-            _, preds = torch.max(outputs, 1)  
-            total += labels.size(0)
-            correct += (preds == labels).sum().item()
-            
-            # 更新进度条
-            progress_bar.set_postfix({
-                'loss': running_loss / (progress_bar.n + 1),
-                'acc': 100 * correct / total
-            })
+            # 计算统计信息
+            train_loss += loss.item()
+            _, predicted = torch.max(outputs, 1)
+            train_total += labels.size(0)
+            train_correct += (predicted == labels).sum().item()
         
-        # 计算本轮平均损失和准确率
-        epoch_loss = running_loss / len(train_loader)
-        epoch_acc = 100 * correct / total
+        # 计算epoch级别的指标
+        epoch_loss = train_loss / len(train_loader)
+        epoch_acc = train_correct / train_total
+        epoch_time = time.time() - epoch_start
         
-        # 记录历史
+        # 记录训练历史
         history['train_loss'].append(epoch_loss)
         history['train_acc'].append(epoch_acc)
         
-        print(f'Epoch {epoch+1}/{num_epochs}, Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.4f}')  
-        
-        # 每个epoch保存一次模型  
-        torch.save(model.state_dict(), model_save_path)  
+        # 显示进度
+        print(f"Epoch {epoch+1}/{num_epochs} - "
+              f"Loss: {epoch_loss:.4f}, Acc: {epoch_acc:.4f}, "
+              f"Time: {epoch_time:.2f}s")
     
-    # 计算总训练时间
     total_time = time.time() - start_time
-    print(f"训练完成! 总时间: {total_time:.2f}秒")
+    print(f"训练完成! 总时间: {total_time:.2f}s")
     
-    print("分类报告:")  
-    print(classification_report(labels.cpu().numpy(), preds.cpu().numpy(), target_names=INTENT_CLASSES))  
+    # 保存模型和标签映射
+    model_dir = os.path.dirname(model_save_path)
+    if model_dir and not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+        
+    # 保存模型和标签映射
+    # 创建包含模型状态和标签映射的字典
+    save_dict = {
+        'model_state_dict': model.state_dict(),
+        'intent_labels': train_labels,
+        'input_size': input_size
+    }
+    torch.save(save_dict, model_save_path)
+    print(f"模型已保存到: {model_save_path}")
     
-    # 绘制训练曲线
-    plot_training_curves(history, os.path.dirname(model_save_path), "fast", augment)
+    # 保存训练历史
+    if model_dir:
+        plot_training_curves(history, model_dir, 'fast', augment)
     
-    return model  
+    return model, history, train_labels
 
 def train_precise_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_EPOCHS,
                        augment=True, augment_prob=0.5, use_cache=True, seed=42):
-    """训练二级精确分类器（支持数据增强）"""
-    # 设置随机种子
+    """训练精确分类器模型"""
     set_seed(seed)
 
     # 设置设备
@@ -347,7 +335,7 @@ def train_precise_model(data_dir, annotation_file, model_save_path, num_epochs=N
         
         # 每个epoch保存一次模型  
         torch.save(model.state_dict(), model_save_path)  
-    
+        
     # 计算总训练时间
     total_time = time.time() - start_time
     print(f"训练完成! 总时间: {total_time:.2f}秒")
@@ -358,7 +346,24 @@ def train_precise_model(data_dir, annotation_file, model_save_path, num_epochs=N
     # 绘制训练曲线
     plot_training_curves(history, os.path.dirname(model_save_path), "precise", augment)
     
-    return model 
+    # 保存模型，包含标签映射信息
+    model_dir = os.path.dirname(model_save_path)
+    if model_dir and not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+    
+    # 保存模型和标签映射
+    save_dict = {
+        'model_state_dict': model.state_dict(),
+        'intent_labels': intent_labels
+    }
+    torch.save(save_dict, model_save_path)
+    print(f"模型已保存到: {model_save_path}")
+    
+    # 保存训练历史
+    if model_dir:
+        plot_training_curves(history, model_dir, 'precise', augment)
+    
+    return model, history, intent_labels
 
 def plot_training_curves(history, save_dir, model_type, augment=True):
     """绘制训练曲线并保存"""
@@ -408,20 +413,38 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    # 加载模型
+    checkpoint = torch.load(model_path, map_location=device)
+    
+    # 检查是否是新的保存格式
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        print("检测到新的模型保存格式，包含标签映射和状态字典")
+        model_state = checkpoint['model_state_dict']
+        intent_labels = checkpoint['intent_labels']
+        num_classes = len(intent_labels)
+        print(f"模型包含 {num_classes} 个意图类别: {intent_labels}")
+        
+        # 获取input_size (对于fast模型)
+        input_size = checkpoint.get('input_size', 39)
+    else:
+        print("检测到旧的模型保存格式，仅包含状态字典")
+        model_state = checkpoint
+        num_classes = len(INTENT_CLASSES)
+        input_size = 39  # 默认值
+    
     if model_type == 'fast':
         # 加载FastIntentClassifier模型
-        # 注意: 由于缺少input_size参数，我们需要先创建一个示例模型
-        # 我们使用MFCC特征加上上下文帧，所以特征大小为(N_MFCC * (2*CONTEXT_FRAMES + 1))
-        input_size = N_MFCC * (2*CONTEXT_FRAMES + 1)
-        model = FastIntentClassifier(input_size=input_size, num_classes=len(INTENT_CLASSES))
+        print(f"创建新的FastIntentClassifier实例，输入维度: {input_size}，类别数: {num_classes}")
+        model = FastIntentClassifier(input_size=input_size, num_classes=num_classes)
         
         # 加载保存的权重
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        print("加载模型权重")
+        model.load_state_dict(model_state)
         model.to(device)
         model.eval()
         
-        # 创建示例输入
-        dummy_input = torch.randn(1, 1, input_size, device=device)  # 批量大小为1，序列长度为1
+        # 创建示例输入（支持批量输入和单个输入）
+        dummy_input = torch.randn(1, 500, input_size, device=device)  # 批量大小为1，序列长度为500
         
         # 定义ONNX导出的输入和输出名称
         input_names = ["input"]
@@ -436,6 +459,7 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
             }
         
         # 导出模型
+        print(f"导出模型到 {onnx_save_path}")
         torch.onnx.export(
             model,
             dummy_input,
@@ -444,17 +468,17 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
             output_names=output_names,
             dynamic_axes=dynamic_axes_dict,
             export_params=True,
-            opset_version=12,
+            opset_version=13,  # 使用更高版本的opset支持更多操作
             do_constant_folding=True,
             verbose=False
         )
     
     elif model_type == 'precise':
         # 加载PreciseIntentClassifier模型
-        model = PreciseIntentClassifier(num_classes=len(INTENT_CLASSES))
+        model = PreciseIntentClassifier(num_classes=num_classes)
         
         # 加载保存的权重
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.load_state_dict(model_state)
         model.to(device)
         model.eval()
         
@@ -486,7 +510,7 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
             output_names=output_names,
             dynamic_axes=dynamic_axes_dict,
             export_params=True,
-            opset_version=12,
+            opset_version=13,
             do_constant_folding=True,
             verbose=False
         )
@@ -517,7 +541,7 @@ if __name__ == "__main__":
     
     # 训练模型
     if args.model_type == 'fast':  
-        model = train_fast_model(
+        model, history, train_labels = train_fast_model(
             args.data_dir, 
             args.annotation_file, 
             model_save_path, 
@@ -528,7 +552,7 @@ if __name__ == "__main__":
             args.seed
         )  
     else:  
-        model = train_precise_model(
+        model, history, train_labels = train_precise_model(
             args.data_dir, 
             args.annotation_file, 
             model_save_path, 
