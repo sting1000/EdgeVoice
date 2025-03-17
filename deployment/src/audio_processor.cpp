@@ -687,5 +687,18 @@ std::pair<std::vector<float>, int> loadWavFile(const std::string& file_path, int
     return std::make_pair(audio_data, header.sample_rate);
 }
 
-} // namespace edgevoice 
+WavData loadWavFile(const std::string& filename) {
+    // 使用新版本的loadWavFile函数，保持默认目标采样率
+    auto [samples, sample_rate] = loadWavFile(filename, 16000);
+    
+    // 创建并返回WavData结构
+    WavData wav_data;
+    wav_data.samples = samples;
+    wav_data.sample_rate = sample_rate;
+    wav_data.bit_depth = 16; // 假设16位深度（这是最常见的）
+    wav_data.channels = 1;   // 假设单声道（因为我们已经将多声道音频合并为单声道）
+    
+    return wav_data;
+}
+
 } // namespace edgevoice 
