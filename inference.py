@@ -10,6 +10,10 @@ from models.fast_classifier import FastIntentClassifier
 from models.precise_classifier import PreciseIntentClassifier  
 from transformers import DistilBertTokenizer  
 import torch.nn.functional as F  
+import pandas as pd  
+import os  
+from tqdm import tqdm  
+from sklearn.metrics import confusion_matrix, classification_report  
 
 class IntentInferenceEngine:  
     def __init__(self, fast_model_path, precise_model_path=None,   
@@ -77,6 +81,37 @@ class IntentInferenceEngine:
                 
                 # 如果有input_size，读取它
                 input_size = checkpoint.get('input_size', 39)
+                
+                # 检查是否使用增强特征
+                enhanced_features = checkpoint.get('enhanced_features', False)
+                context_frames = checkpoint.get('context_frames', 0)
+                
+                # 根据模型配置更新特征提取器
+                if enhanced_features:
+                    print(f"模型使用增强特征，输入维度: {input_size}")
+                    # 更新特征提取器以匹配模型
+                    self.feature_extractor = FeatureExtractor(
+                        enhanced_features=True,
+                        context_frames=context_frames
+                    )
+                    print(f"已配置特征提取器使用增强特征和上下文帧数: {context_frames}")
+                elif context_frames > 0:
+                    print(f"模型使用标准特征+上下文，上下文帧数: {context_frames}，输入维度: {input_size}")
+                    # 更新特征提取器以匹配模型
+                    self.feature_extractor = FeatureExtractor(
+                        context_frames=context_frames
+                    )
+                    print(f"已配置特征提取器使用上下文帧数: {context_frames}")
+                
+                # 显示模型验证准确率信息（如果有）
+                if 'validation_accuracy' in checkpoint:
+                    val_acc = checkpoint['validation_accuracy']
+                    print(f"模型验证准确率: {val_acc:.4f}")
+                
+                if 'class_accuracy' in checkpoint:
+                    print("\n各类别准确率:")
+                    for intent, acc in checkpoint['class_accuracy'].items():
+                        print(f"  {intent}: {acc:.4f}")
                 
                 # 创建与特征维度匹配的模型
                 model = FastIntentClassifier(input_size=input_size, num_classes=len(self.intent_classes))
@@ -335,3 +370,137 @@ class IntentInferenceEngine:
         """
         # Predict intent directly from audio stream data
         return self.predict_intent(audio_stream, transcript)
+    
+    def model_analysis(self, data_dir, annotation_file, batch_size=8):
+        """分析模型在数据集上的性能，创建混淆矩阵并分析易混淆的类别"""
+        print("\n开始模型分析...")
+        
+        # 加载数据集
+        print(f"加载数据集: {annotation_file}")
+        df = pd.read_csv(annotation_file)
+        
+        # 统计每个类别的样本数
+        class_counts = df['intent'].value_counts()
+        print("\n类别分布:")
+        for intent, count in class_counts.items():
+            print(f"  {intent}: {count}样本")
+        
+        # 存储预测结果
+        predictions = []
+        true_labels = []
+        confidences = []
+        file_paths = []
+        
+        # 分批处理数据
+        total_samples = len(df)
+        num_batches = (total_samples + batch_size - 1) // batch_size
+        
+        print(f"\n开始评估 {total_samples} 个样本...")
+        
+        # 遍历数据集
+        for batch_idx in tqdm(range(num_batches)):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, total_samples)
+            
+            batch_df = df.iloc[start_idx:end_idx]
+            
+            for _, row in batch_df.iterrows():
+                try:
+                    # 获取音频文件和真实标签
+                    audio_path = os.path.join(data_dir, row['file_path'])
+                    true_intent = row['intent']
+                    
+                    # 处理音频文件
+                    result = self.process_audio_file(audio_path)
+                    pred_intent, confidence, _, _, _ = result
+                    
+                    # 存储结果
+                    predictions.append(pred_intent)
+                    true_labels.append(true_intent)
+                    confidences.append(confidence)
+                    file_paths.append(row['file_path'])
+                except Exception as e:
+                    print(f"处理样本时出错: {e}")
+        
+        # 计算整体准确率
+        correct = sum(1 for p, t in zip(predictions, true_labels) if p == t)
+        accuracy = correct / len(true_labels) if true_labels else 0
+        print(f"\n整体准确率: {accuracy:.4f} ({correct}/{len(true_labels)})")
+        
+        # 创建混淆矩阵
+        from sklearn.metrics import confusion_matrix, classification_report
+        
+        # 获取唯一的标签
+        unique_labels = sorted(set(true_labels) | set(predictions))
+        
+        # 创建混淆矩阵
+        cm = confusion_matrix(true_labels, predictions, labels=unique_labels)
+        
+        # 输出混淆矩阵
+        print("\n混淆矩阵:")
+        print("真实\\预测", end="\t")
+        for label in unique_labels:
+            print(f"{label}", end="\t")
+        print()
+        
+        for i, true_label in enumerate(unique_labels):
+            print(f"{true_label}", end="\t")
+            for j in range(len(unique_labels)):
+                print(f"{cm[i, j]}", end="\t")
+            print()
+        
+        # 计算每个类别的准确率和错误率
+        class_metrics = {}
+        for i, label in enumerate(unique_labels):
+            if sum(cm[i]) > 0:  # 避免除以零
+                class_accuracy = cm[i, i] / sum(cm[i])
+                # 找出最容易混淆的类别（除了自身外错误率最高的）
+                confusion_rates = [(unique_labels[j], cm[i, j] / sum(cm[i])) 
+                                  for j in range(len(unique_labels)) if j != i and cm[i, j] > 0]
+                confusion_rates.sort(key=lambda x: x[1], reverse=True)
+                
+                class_metrics[label] = {
+                    'accuracy': class_accuracy,
+                    'confusion_rates': confusion_rates
+                }
+        
+        # 输出分类报告
+        class_report = classification_report(true_labels, predictions, labels=unique_labels)
+        print("\n分类报告:")
+        print(class_report)
+        
+        # 分析混淆最严重的类别对
+        print("\n混淆分析 (错误率 > 10%):")
+        for label, metrics in class_metrics.items():
+            print(f"\n类别: {label}")
+            print(f"  准确率: {metrics['accuracy']:.4f}")
+            
+            if metrics['confusion_rates']:
+                print(f"  最容易混淆的类别:")
+                for confused_label, rate in metrics['confusion_rates']:
+                    if rate > 0.1:  # 只显示错误率大于10%的
+                        print(f"    → {confused_label}: {rate:.4f} ({rate*100:.1f}%)")
+        
+        # 输出被错分类的样本
+        print("\n错误分类样本:")
+        errors = [(fp, tl, pl, cf) for fp, tl, pl, cf in zip(file_paths, true_labels, predictions, confidences) 
+                 if tl != pl]
+        
+        # 按类别对进行分组
+        error_groups = {}
+        for fp, tl, pl, cf in errors:
+            key = (tl, pl)
+            if key not in error_groups:
+                error_groups[key] = []
+            error_groups[key].append((fp, cf))
+        
+        # 显示各类别对的错误样本
+        for (true_label, pred_label), samples in sorted(error_groups.items(), 
+                                                       key=lambda x: len(x[1]), reverse=True):
+            print(f"\n{true_label} → {pred_label} (共 {len(samples)} 个样本):")
+            for fp, cf in samples[:5]:  # 只显示前5个样本
+                print(f"  {fp} (置信度: {cf:.4f})")
+            if len(samples) > 5:
+                print(f"  ... 以及其他 {len(samples)-5} 个样本")
+        
+        return class_metrics, cm, unique_labels

@@ -21,7 +21,7 @@ MAX_COMMAND_DURATION_S = 5
 N_MFCC = 13  
 N_FFT = int(FRAME_LENGTH_MS * TARGET_SAMPLE_RATE / 1000)  
 HOP_LENGTH = int(FRAME_SHIFT_MS * TARGET_SAMPLE_RATE / 1000)  
-CONTEXT_FRAMES = 5  
+CONTEXT_FRAMES = 2  
 
 # 模型参数  
 FAST_MODEL_HIDDEN_SIZE = 64  
@@ -53,3 +53,14 @@ DATA_DIR = "data"
 MODEL_DIR = "saved_models"  
 os.makedirs(DATA_DIR, exist_ok=True)  
 os.makedirs(MODEL_DIR, exist_ok=True)
+
+# 增强特征配置
+USE_ENHANCED_FEATURES = True      # 是否使用增强特征
+
+# 混淆类别处理
+# 一些类别在声学上很相似，可能会混淆，可通过增加它们的权重来改进
+CONFUSION_CLASS_WEIGHTS = {
+    "TAKE_PHOTO": 1.2,            # 增加TAKE_PHOTO的权重，避免与START_RECORDING混淆
+    "START_RECORDING": 1.2,        # 增加START_RECORDING的权重，避免与TAKE_PHOTO混淆
+    "STOP_RECORDING": 1.3,         # 增加STOP_RECORDING的权重，避免与GET_BATTERY_LEVEL混淆
+}
