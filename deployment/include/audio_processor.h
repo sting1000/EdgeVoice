@@ -231,19 +231,10 @@ std::vector<float> standardizeAudioLength(
  * 
  * @param file_path WAV文件路径
  * @param target_sample_rate 目标采样率（如果需要重采样），默认16000
- * @return std::pair<std::vector<float>, int> 音频数据和原始采样率
+ * @return WavData 音频数据结构
  * @throws std::runtime_error 如果文件不存在或格式不支持
  */
-std::pair<std::vector<float>, int> loadWavFile(const std::string& file_path, int target_sample_rate = 16000);
-
-/**
- * @brief 从WAV文件加载音频数据（原接口兼容函数）
- * 
- * @param filename WAV文件路径
- * @return WavData WAV文件数据结构
- * @throws std::runtime_error 如果文件不存在或格式不支持
- */
-WavData loadWavFile(const std::string& filename);
+WavData loadWavFile(const std::string& file_path, int target_sample_rate=16000);
 
 } // namespace edgevoice
 
