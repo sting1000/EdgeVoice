@@ -65,7 +65,13 @@ class MultiHeadSelfAttention(nn.Module):
         return x
         
     def forward(self, x, mask=None):
-        # x: [batch_size, seq_len, d_model]
+        # x: [batch_size, seq_len, d_model] 或 [batch_size, d_model]
+        
+        # 处理2D输入情况 (单帧)
+        if x.dim() == 2:
+            # 如果输入是2D: [batch_size, d_model]，添加序列维度
+            x = x.unsqueeze(1)  # [batch_size, 1, d_model]
+        
         batch_size, seq_len, _ = x.size()
         
         # 独立的Q、K、V投影
@@ -128,7 +134,16 @@ class ConvModule(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
-        # x: [batch_size, seq_len, d_model]
+        # x: [batch_size, seq_len, d_model] 或 [batch_size, d_model]
+        
+        # 处理2D输入情况 (单帧)
+        if x.dim() == 2:
+            # 如果输入是2D: [batch_size, d_model]，添加序列维度
+            x = x.unsqueeze(1)  # [batch_size, 1, d_model]
+            is_single_frame = True
+        else:
+            is_single_frame = False
+            
         residual = x
         x = self.layer_norm(x)
         
@@ -152,6 +167,10 @@ class ConvModule(nn.Module):
         # 显式残差连接，避免广播
         x = x + residual
         
+        # 如果输入是单帧，去掉序列维度
+        if is_single_frame:
+            x = x.squeeze(1)
+            
         return x
 
 class FeedForwardModule(nn.Module):
@@ -170,7 +189,16 @@ class FeedForwardModule(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         
     def forward(self, x):
-        # x: [batch_size, seq_len, d_model]
+        # x: [batch_size, seq_len, d_model] 或 [batch_size, d_model]
+        
+        # 处理2D输入情况 (单帧)
+        if x.dim() == 2:
+            # 如果输入是2D: [batch_size, d_model]，添加序列维度
+            x = x.unsqueeze(1)  # [batch_size, 1, d_model]
+            is_single_frame = True
+        else:
+            is_single_frame = False
+            
         residual = x
         x = self.layer_norm(x)
         
@@ -184,6 +212,10 @@ class FeedForwardModule(nn.Module):
         # 显式相加，避免广播
         x = x + residual
         
+        # 如果输入是单帧，去掉序列维度
+        if is_single_frame:
+            x = x.squeeze(1)
+            
         return x
 
 class ConformerBlock(nn.Module):
@@ -202,7 +234,15 @@ class ConformerBlock(nn.Module):
         self.layer_norm = nn.LayerNorm(d_model)
         
     def forward(self, x, cache=None):
-        # x: [batch_size, seq_len, d_model]
+        # x: [batch_size, seq_len, d_model] 或 [batch_size, d_model]
+        
+        # 处理2D输入情况 (单帧)
+        if x.dim() == 2:
+            # 如果输入是2D: [batch_size, d_model]，添加序列维度
+            x = x.unsqueeze(1)  # [batch_size, 1, d_model]
+            is_single_frame = True
+        else:
+            is_single_frame = False
         
         # 支持状态缓存的前向传播
         if cache is not None:
@@ -210,6 +250,7 @@ class ConformerBlock(nn.Module):
             # 合并当前输入和缓存状态
             if prev_x is not None:
                 x = torch.cat([prev_x, x], dim=1)
+                is_single_frame = False  # 合并后肯定不是单帧了
         
         # FFN模块1 (输出除以2用于缩放)
         ff1_out = self.ff_module1(x)
@@ -237,8 +278,17 @@ class ConformerBlock(nn.Module):
                 new_cache = (x[:, -MAX_CACHED_FRAMES:, :], attn_out[:, -MAX_CACHED_FRAMES:, :], conv_out[:, -MAX_CACHED_FRAMES:, :])
             else:
                 new_cache = (x, attn_out, conv_out)
+            
+            # 如果原输入是单帧，且需要恢复单帧输出
+            if is_single_frame:
+                x = x.squeeze(1)  # 只有在不缓存状态时才有可能恢复为单帧
+                
             return x, new_cache
         
+        # 如果原输入是单帧，且需要恢复单帧输出
+        if is_single_frame:
+            x = x.squeeze(1)
+            
         return x
 
 class FastIntentClassifier(nn.Module):  
@@ -323,7 +373,19 @@ class FastIntentClassifier(nn.Module):
         # 通过Conformer层，同时传递和更新缓存状态
         new_states = []
         for i, block in enumerate(self.conformer_blocks):
-            x, new_state = block(x, cached_states[i])
+            if cached_states[i] is not None:
+                # 带缓存状态的前向传播
+                x, new_state = block(x, cached_states[i])
+            else:
+                # 初始前向传播，没有缓存状态
+                output = block(x)
+                # 检查返回值类型
+                if isinstance(output, tuple):
+                    x, new_state = output
+                else:
+                    x = output
+                    new_state = None
+            
             new_states.append(new_state)
         
         # 对当前chunk进行全局平均池化

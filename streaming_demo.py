@@ -27,10 +27,26 @@ def load_model(model_path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = FastIntentClassifier(input_size=N_MFCC*3)  # 16*3=48维特征
     
-    # 加载预训练权重
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    # 尝试加载模型
+    try:
+        # 首先尝试加载完整的模型字典
+        checkpoint = torch.load(model_path, map_location=device)
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            # 如果是训练过程中保存的完整检查点
+            model.load_state_dict(checkpoint['model_state_dict'])
+            print(f"成功加载模型检查点: {model_path}")
+            intent_labels = checkpoint.get('intent_labels', INTENT_CLASSES)
+            print(f"类别标签: {intent_labels}")
+        else:
+            # 直接加载状态字典
+            model.load_state_dict(checkpoint)
+            print(f"成功加载模型状态字典: {model_path}")
+    except Exception as e:
+        print(f"加载模型时发生错误: {e}")
+        print("使用初始化模型继续...")
+    
     model.to(device)
-    model.eval()
+    model.eval()  # 设置为评估模式
     
     return model, device
 

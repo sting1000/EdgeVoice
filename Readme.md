@@ -238,9 +238,74 @@ python evaluate.py --annotation_file data/test_annotations.csv --fast_model save
 - 长度对准确率的影响图表
 - 长度对推理时间的影响图表
 
-## 8. 模型优化技术
+## 8. 流式处理功能
 
-### 8.1 特征优化
+EdgeVoice系统实现了流式处理技术，支持音频数据的增量处理，特别适合智能眼镜等实时交互场景。
+
+### 8.1 流式处理原理
+
+系统将连续音频流分割成重叠的小块(chunks)进行处理，保留前一块的状态信息，实现低延迟实时识别：
+
+- **块大小**：默认每块10帧(100ms)，可通过`STREAMING_CHUNK_SIZE`参数调整
+- **步长**：默认5帧(50ms)，可通过`STREAMING_STEP_SIZE`参数调整
+- **状态缓存**：保留模型的隐藏状态，确保连续识别的一致性
+- **早停机制**：当置信度达到预设阈值(默认0.9)时提前结束识别
+
+### 8.2 流式处理演示
+
+使用流式处理演示脚本测试模型的流式识别能力：
+
+```bash
+# 使用音频文件测试流式处理
+python streaming_demo.py --model_path saved_models/fast_intent_model.pth --audio_file data/samples/take_photo.wav
+
+# 自定义块大小和步长
+python streaming_demo.py --model_path saved_models/fast_intent_model.pth --audio_file data/samples/take_photo.wav --chunk_size 15 --step_size 8
+```
+
+### 8.3 流式模型评估
+
+专门的流式评估脚本可分析模型在流式场景下的性能：
+
+```bash
+python streaming_evaluation.py --model_path saved_models/fast_intent_model.pth --annotation_file data/test_annotations.csv
+
+# 自定义置信度阈值
+python streaming_evaluation.py --model_path saved_models/fast_intent_model.pth --annotation_file data/test_annotations.csv --confidence_threshold 0.85
+
+# 禁用多数投票机制
+python streaming_evaluation.py --model_path saved_models/fast_intent_model.pth --annotation_file data/test_annotations.csv --no_majority_voting
+```
+
+评估结果将包含：
+- 流式识别准确率
+- 早停比例（提前结束识别的样本比例）
+- 平均决策延迟（从音频开始到得出决策的时间）
+- 预测稳定性分析（预测结果变化次数统计）
+- 各类别的性能指标
+- 混淆矩阵和性能可视化图表
+
+### 8.4 流式训练
+
+系统支持专门的流式训练模式，使模型更适应增量数据处理场景：
+
+```bash
+# 以流式模式训练快速分类器
+python train.py --annotation_file data/annotations.csv --model_type fast --streaming_mode
+
+# 测试流式训练效果
+python test_streaming_training.py
+```
+
+流式训练的特点：
+- 使用分块特征训练模型
+- 在训练过程中模拟流式处理场景
+- 提高模型对部分音频片段的识别能力
+- 减少对完整音频的依赖，适合早期识别
+
+## 9. 模型优化技术
+
+### 9.1 特征优化
 
 系统使用了优化的MFCC特征提取：
 - **维度优化**：使用16维MFCC特征（而非传统13维）
@@ -248,24 +313,25 @@ python evaluate.py --annotation_file data/test_annotations.csv --fast_model save
 - **增强特征**：计算Delta和Delta-Delta捕捉时间动态信息
 - **上下文融合**：使用±2帧上下文信息增强当前帧特征
 
-### 8.2 Conformer优化
+### 9.2 Conformer优化
 
 一级快速分类器采用轻量级Conformer架构：
 - **平衡参数**：4层Conformer块，8个注意力头
 - **256维隐藏层**：提供充分的表示能力且易于16倍数对齐
 - **31大小卷积核**：有效捕捉局部语音特征
+- **流式架构**：支持帧级增量处理，保持状态连续性
 
-### 8.3 量化与剪枝
+### 9.3 量化与剪枝
 
 - **INT8量化**：将模型权重从FP32降至INT8，减少内存占用
 - **模型剪枝**：移除贡献小的参数，减少计算量
 - **硬件加速**：针对边缘设备进行特定优化，提高推理速度
 
-## 9. 工具脚本
+## 10. 工具脚本
 
 在 `tools` 目录中提供了一些实用工具脚本：
 
-### 9.1 提示语生成工具
+### 10.1 提示语生成工具
 
 `prompt_generator.py` 脚本可以生成更多样化的语音意图提示语，增强模型训练数据的多样性：
 
@@ -275,7 +341,7 @@ python tools/prompt_generator.py --variants 5 --json_output expanded_prompts.jso
 
 该工具可以为每个意图类别生成更多自然的表达变体，使用模板和终止词组合来创建符合智能眼镜场景的语音指令。
 
-### 9.2 数据收集工具
+### 10.2 数据收集工具
 
 `data_collection_tool.py` 提供了用户友好的界面，用于收集和标注训练数据：
 
