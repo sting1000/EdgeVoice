@@ -563,12 +563,27 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
         print(f"模型包含 {num_classes} 个意图类别: {intent_labels}")
         
         # 获取input_size (对于fast模型)
-        input_size = checkpoint.get('input_size', 39)
+        input_size = checkpoint.get('input_size', N_MFCC * 3)  # 使用N_MFCC * 3作为默认值，通常是48维
+        
+        # 检查模型状态字典中的参数形状，以确定真实的input_size
+        if 'input_projection.weight' in model_state:
+            # 从输入投影矩阵的形状推断input_size
+            _, actual_input_size = model_state['input_projection.weight'].shape
+            if actual_input_size != input_size:
+                print(f"警告: 从保存的状态字典中检测到不同的input_size: {actual_input_size}，将使用此值")
+                input_size = actual_input_size
     else:
         print("检测到旧的模型保存格式，仅包含状态字典")
         model_state = checkpoint
         num_classes = len(INTENT_CLASSES)
-        input_size = 39  # 默认值
+        # 从模型权重中推断input_size
+        if isinstance(model_state, dict) and 'input_projection.weight' in model_state:
+            _, input_size = model_state['input_projection.weight'].shape
+            print(f"从模型权重中推断input_size: {input_size}")
+        else:
+            input_size = N_MFCC * 3  # 默认值
+    
+    print(f"使用input_size={input_size}创建模型")
     
     # 加载FastIntentClassifier模型
     print(f"创建新的FastIntentClassifier实例，输入维度: {input_size}，类别数: {num_classes}")
