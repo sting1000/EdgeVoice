@@ -94,7 +94,7 @@ class FeatureExtractor:
             delta_mfcc, 
             delta2_mfcc, 
             energy, 
-            mel_spec_db[:10],  # 使用前10个梅尔频带特征
+            mel_spec_db[:5],  # 使用前5个梅尔频带特征
             spectral_contrast,
             spectral_flatness,
             spectral_centroid,
@@ -150,12 +150,12 @@ class FeatureExtractor:
         """获取特征维度"""
         if self.enhanced_features:
             # 计算增强特征的维度
-            # MFCC(13) + Delta(13) + Delta2(13) + Energy(1) + Mel Spectrogram(10) 
+            # MFCC(16) + Delta(16) + Delta2(16) + Energy(1) + Mel Spectrogram(5) 
             # + Spectral Contrast(7) + Flatness(1) + Centroid(1) + ZCR(1)
-            base_dim = 13 + 13 + 13 + 1 + 10 + 7 + 1 + 1 + 1  # 总共60维
+            base_dim = N_MFCC * 3 + 1 + 5 + 7 + 1 + 1 + 1  # 总共64维
         else:
             # 基本特征：MFCC + Delta + Delta2
-            base_dim = self.n_mfcc * 3  # 通常是13*3=39维
+            base_dim = self.n_mfcc * 3  # 通常是16*3=48维
         
         if self.context_frames > 0:
             # 如果有上下文特征，每帧的特征维度乘以上下文窗口大小

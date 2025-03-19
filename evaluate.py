@@ -35,7 +35,7 @@ def evaluate_models(data_dir, annotation_file, fast_model_path, precise_model_pa
     def fast_feature_extractor(audio, sr, **kwargs):
         audio = standardize_audio_length(audio, sr)
         # Extract MFCC features and dynamic features
-        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
+        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=16)
         delta_mfccs = librosa.feature.delta(mfccs)
         delta2_mfccs = librosa.feature.delta(mfccs, order=2)
         features = np.concatenate([mfccs, delta_mfccs, delta2_mfccs], axis=0)

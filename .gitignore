@@ -40,6 +40,7 @@ data/
 reports/
 evaluation_results/
 visualizations/
+analysis_results/
 
 # 模型文件和缓存
 saved_models/

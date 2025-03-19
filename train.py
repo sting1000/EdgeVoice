@@ -48,7 +48,7 @@ def extract_features(audio, sr):
         
         # 提取MFCC特征
         # 可以根据需要修改特征提取方法
-        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
+        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=16)
         delta_mfccs = librosa.feature.delta(mfccs)
         delta2_mfccs = librosa.feature.delta(mfccs, order=2)
         
@@ -62,7 +62,7 @@ def extract_features(audio, sr):
     except Exception as e:
         print(f"特征提取错误: {e}")
         # 返回一个安全的默认特征
-        return np.zeros((100, 39))  # 默认100帧，39个特征
+        return np.zeros((100, 48))  # 默认100帧，48个特征
 
 def process_audio_for_precise(audio, sr, tokenizer, transcript=None):
     """处理音频数据，为精确分类器准备特征
@@ -117,84 +117,12 @@ def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_
     def feature_extractor(audio, sr, **kwargs):
         audio = standardize_audio_length(audio, sr)
         # 提取MFCC特征和动态特征
-        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
+        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=16)
         delta_mfccs = librosa.feature.delta(mfccs)
         delta2_mfccs = librosa.feature.delta(mfccs, order=2)
         features = np.concatenate([mfccs, delta_mfccs, delta2_mfccs], axis=0)
         return features.T  # (time, features) 格式，不含上下文
-    
-    # 检查是否有类别只有一个样本
-    print("检查数据集类别分布...")
-    annotations = pd.read_csv(annotation_file)
-    class_counts = annotations['intent'].value_counts()
-    
-    # 检查是否有类别只有一个样本
-    single_sample_classes = class_counts[class_counts == 1].index.tolist()
-    if single_sample_classes:
-        print(f"警告: 发现以下类别只有一个样本: {single_sample_classes}")
-        print("为避免分层抽样错误，复制这些类别的样本...")
-        
-        # 为每个只有一个样本的类别复制其样本
-        new_rows = []
-        for intent in single_sample_classes:
-            row = annotations[annotations['intent'] == intent].iloc[0].copy()
-            
-            # 复制音频文件
-            orig_file_path = os.path.join(data_dir, row['file_path'])
-            if os.path.exists(orig_file_path):
-                # 创建新的文件路径
-                base, ext = os.path.splitext(row['file_path'])
-                new_file_path = f"{base}_copy{ext}"
-                full_new_path = os.path.join(data_dir, new_file_path)
-                
-                # 确保目标目录存在
-                os.makedirs(os.path.dirname(full_new_path), exist_ok=True)
-                
-                # 复制音频文件
-                import shutil
-                try:
-                    shutil.copy2(orig_file_path, full_new_path)
-                    print(f"已复制音频文件: {orig_file_path} -> {full_new_path}")
-                    
-                    # 更新文件路径
-                    row_dict = row.to_dict()
-                    row_dict['file_path'] = new_file_path
-                    new_rows.append(row_dict)
-                except Exception as e:
-                    print(f"复制音频文件失败: {e}")
-                    # 如果复制失败，我们使用空音频文件代替
-                    try:
-                        # 创建一个空音频文件（复制原始音频）
-                        audio, sr = librosa.load(orig_file_path, sr=TARGET_SAMPLE_RATE)
-                        import soundfile as sf
-                        sf.write(full_new_path, audio, sr)
-                        print(f"已创建副本音频文件: {full_new_path}")
-                        
-                        # 更新文件路径
-                        row_dict = row.to_dict()
-                        row_dict['file_path'] = new_file_path
-                        new_rows.append(row_dict)
-                    except Exception as e2:
-                        print(f"创建副本音频文件失败: {e2}")
-            else:
-                print(f"原始音频文件不存在: {orig_file_path}，无法复制")
-        
-        # 添加复制的样本到原始数据集
-        if new_rows:
-            # 使用pandas.concat代替已弃用的append方法
-            new_df = pd.DataFrame(new_rows)
-            annotations = pd.concat([annotations, new_df], ignore_index=True)
-            print(f"已添加 {len(new_rows)} 个样本副本，现在共有 {len(annotations)} 个样本")
-            
-            # 保存临时注释文件
-            temp_annotation_file = os.path.join(os.path.dirname(annotation_file), 
-                                               "temp_" + os.path.basename(annotation_file))
-            annotations.to_csv(temp_annotation_file, index=False)
-            print(f"创建临时注释文件: {temp_annotation_file}")
-            
-            # 使用临时文件
-            annotation_file = temp_annotation_file
-    
+
     # 准备数据加载器
     train_loader, train_labels = prepare_augmented_dataloader(
         annotation_file=annotation_file, 
@@ -207,8 +135,8 @@ def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_
         seed=seed
     )
     
-    # 创建模型（MFCC+Delta+Delta2特征，共39维）
-    input_size = 39
+    # 创建模型（MFCC+Delta+Delta2特征，共48维）
+    input_size = N_MFCC * 3
     model = FastIntentClassifier(input_size=input_size, num_classes=len(train_labels))
     model = model.to(DEVICE)  
     
