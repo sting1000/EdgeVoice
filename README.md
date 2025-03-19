@@ -76,39 +76,40 @@ EdgeVoice支持将训练好的PyTorch模型导出为ONNX格式，便于在更多
 
 ```bash
 # 训练并导出快速分类器
-python train.py --annotation_file data/annotations.csv --model_type fast --export_onnx
+python train.py --annotation_file data/annotations.csv --model_type fast --export_onnx --model_save_path saved_models/fast_intent_model.pth
 
-# 训练并导出精确分类器
-python train.py --annotation_file data/annotations.csv --model_type precise --export_onnx
+# 训练并导出流式模型
+python train.py --annotation_file data/annotations.csv --model_type streaming --export_onnx --model_save_path saved_models/streaming_model.pth
 
 # 指定ONNX模型保存路径
-python train.py --annotation_file data/annotations.csv --model_type fast --export_onnx --onnx_save_path saved_models/fast_model_optimized.onnx
+python train.py --annotation_file data/annotations.csv --model_type fast --export_onnx --model_save_path saved_models/fast_intent_model.pth --onnx_save_path saved_models/fast_model_optimized.onnx
 ```
 
-#### 使用专用脚本转换现有模型
+#### 转换已训练好的模型为ONNX格式
 
-对于已经训练好的模型，可以使用`convert_to_onnx.py`脚本进行转换：
+对于已经训练好的模型，可以直接使用train.py的导出功能：
 
 ```bash
 # 转换快速分类器
-python convert_to_onnx.py --model_path saved_models/fast_intent_model.pth --model_type fast
+python train.py --annotation_file data/annotations.csv --model_type fast --export_onnx --model_save_path saved_models/fast_intent_model.pth --num_epochs 0
 
-# 转换精确分类器
-python convert_to_onnx.py --model_path saved_models/precise_intent_model.pth --model_type precise
+# 转换流式模型
+python train.py --annotation_file data/annotations.csv --model_type streaming --export_onnx --model_save_path saved_models/streaming_model.pth --num_epochs 0
 
 # 指定ONNX模型保存路径
-python convert_to_onnx.py --model_path saved_models/fast_intent_model.pth --model_type fast --onnx_path saved_models/fast_optimized.onnx
+python train.py --annotation_file data/annotations.csv --model_type fast --export_onnx --model_save_path saved_models/fast_intent_model.pth --onnx_save_path saved_models/fast_optimized.onnx --num_epochs 0
 
 # 使用静态输入形状（如果目标平台不支持动态形状）
-python convert_to_onnx.py --model_path saved_models/fast_intent_model.pth --model_type fast --static
+python train.py --annotation_file data/annotations.csv --model_type fast --export_onnx --model_save_path saved_models/fast_intent_model.pth --dynamic_axes False --num_epochs 0
 ```
+
+> 注意：使用`--num_epochs 0`参数可以跳过训练过程，直接进行模型导出。
 
 #### ONNX模型的优势
 
 - **跨平台兼容性**：可在多种推理引擎和硬件上运行
 - **运行时优化**：许多平台可对ONNX模型进行进一步优化
 - **更低的部署复杂度**：不依赖于PyTorch运行环境
-- **更快的推理速度**：在边缘设备上通常能获得更好的性能
 
 ### 4.4 训练参数说明
 

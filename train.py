@@ -8,19 +8,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm  
 from sklearn.metrics import classification_report, accuracy_score  
-# 移除transformers依赖，因为我们只关注流式训练
-# from transformers import DistilBertTokenizer
 import time
 import random
 from config import *  
-# 使用增强版数据加载器替换原始版本
-# from data_utils import prepare_dataloader  
 from augmented_dataset import prepare_augmented_dataloader, standardize_audio_length
-# 导入流式训练数据加载器
 from streaming_dataset import prepare_streaming_dataloader
 from models.fast_classifier import FastIntentClassifier  
-# 暂时不使用PreciseClassifier
-# from models.precise_classifier import PreciseIntentClassifier  
 import librosa
 import torch.onnx
 import pandas as pd
@@ -68,53 +61,6 @@ def extract_features(audio, sr):
         # 返回一个安全的默认特征
         return np.zeros((100, 48))  # 默认100帧，48个特征
 
-# 注释掉Precise模型相关的函数，因为我们只关注流式训练
-"""
-def process_audio_for_precise(audio, sr, tokenizer, transcript=None):
-    处理音频数据，为精确分类器准备特征
-    
-    参数:
-        audio: 音频数据
-        sr: 采样率
-        tokenizer: 分词器
-        transcript: 文本转录(可选)
-        
-    返回:
-        特征字典，包含input_ids和attention_mask
-    
-    try:
-        # 使用提供的文本转录或默认文本
-        if transcript is None or transcript == "":
-            # 在实际场景中，此处应调用ASR模型获取文本
-            text = "未提供转录文本"
-        else:
-            text = transcript
-        
-        # 使用分词器处理文本
-        encoding = tokenizer(
-            text,
-            padding='max_length',
-            truncation=True,
-            max_length=128,
-            return_tensors='pt'
-        )
-        
-        # 提取所需的特征并转换为numpy数组
-        # 注意：这里我们需要将PyTorch tensor转换为numpy数组
-        # 因为Dataset.__getitem__返回的数据会被collate_fn处理
-        return {
-            'input_ids': encoding['input_ids'].squeeze(0).numpy(),
-            'attention_mask': encoding['attention_mask'].squeeze(0).numpy()
-        }
-    except Exception as e:
-        print(f"文本特征提取错误: {e}")
-        # 返回安全的默认值
-        return {
-            'input_ids': np.zeros((128,), dtype=np.int64),
-            'attention_mask': np.zeros((128,), dtype=np.int64)
-        }
-"""
-
 def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_EPOCHS, 
                     augment=True, augment_prob=0.5, use_cache=True, seed=42):
     """训练快速分类器模型"""
@@ -129,6 +75,55 @@ def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_
         delta2_mfccs = librosa.feature.delta(mfccs, order=2)
         features = np.concatenate([mfccs, delta_mfccs, delta2_mfccs], axis=0)
         return features.T  # (time, features) 格式，不含上下文
+
+    # 如果num_epochs为0，跳过训练过程，直接加载模型(如果存在)或创建新模型
+    if num_epochs == 0:
+        # 创建模型（MFCC+Delta+Delta2特征，共48维）
+        input_size = N_MFCC * 3
+        
+        # 尝试加载已有模型
+        if os.path.exists(model_save_path):
+            print(f"加载已有模型: {model_save_path}")
+            checkpoint = torch.load(model_save_path, map_location=torch.device('cpu'))
+            
+            # 检查是否是新的保存格式
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model_state = checkpoint['model_state_dict']
+                intent_labels = checkpoint['intent_labels']
+                model = FastIntentClassifier(input_size=input_size, num_classes=len(intent_labels))
+                model.load_state_dict(model_state)
+                print(f"模型加载成功，意图标签: {intent_labels}")
+                return model, intent_labels
+            else:
+                print("模型格式不兼容，需要先训练模型")
+                # 继续正常训练流程
+        else:
+            print(f"模型文件不存在: {model_save_path}")
+            print("无法跳过训练过程，请提供有效的模型文件或设置num_epochs > 0")
+            # 继续正常训练流程，但需要获取意图标签
+            train_loader, train_labels = prepare_augmented_dataloader(
+                annotation_file=annotation_file, 
+                data_dir=data_dir, 
+                feature_extractor=feature_extractor,
+                batch_size=1,  # 最小批次，仅用于获取标签
+                augment=False,
+                use_cache=False
+            )
+            # 创建模型
+            model = FastIntentClassifier(input_size=input_size, num_classes=len(train_labels))
+            # 保存模型
+            save_dict = {
+                'model_state_dict': model.state_dict(),
+                'intent_labels': train_labels,
+                'input_size': input_size
+            }
+            # 确保目录存在
+            model_dir = os.path.dirname(model_save_path)
+            if model_dir and not os.path.exists(model_dir):
+                os.makedirs(model_dir)
+            torch.save(save_dict, model_save_path)
+            print(f"已创建新模型并保存到: {model_save_path}")
+            return model, train_labels
 
     # 准备数据加载器
     train_loader, train_labels = prepare_augmented_dataloader(
@@ -229,122 +224,7 @@ def train_fast_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_
     if model_dir:
         plot_training_curves(history, model_dir, 'fast', augment)
     
-    return model, history, train_labels
-
-# 注释掉train_precise_model函数，因为我们只关注流式训练
-"""
-def train_precise_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_EPOCHS,
-                       augment=True, augment_prob=0.5, use_cache=True, seed=42):
-    设置随机种子以确保可重现性
-    set_seed(seed)
-    
-    # 创建DistilBERT分词器
-    try:
-        # 尝试从本地路径加载
-        tokenizer = DistilBertTokenizer.from_pretrained(DISTILBERT_MODEL_PATH)
-        print(f"从本地路径加载分词器: {DISTILBERT_MODEL_PATH}")
-    except:
-        # 如果本地路径加载失败，从Hugging Face下载
-        tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
-        print("从Hugging Face下载分词器")
-        
-        # 保存到本地路径，方便下次使用
-        os.makedirs(DISTILBERT_MODEL_PATH, exist_ok=True)
-        tokenizer.save_pretrained(DISTILBERT_MODEL_PATH)
-        print(f"分词器已保存到本地路径: {DISTILBERT_MODEL_PATH}")
-    
-    # 定义文本特征提取器
-    def text_feature_extractor(audio, sr, transcript, **kwargs):
-        return process_audio_for_precise(audio, sr, tokenizer, transcript)
-    
-    # 准备数据加载器
-    train_loader, train_labels = prepare_augmented_dataloader(
-        annotation_file=annotation_file, 
-        data_dir=data_dir, 
-        text_feature_extractor=text_feature_extractor,
-        batch_size=BATCH_SIZE, 
-        augment=augment,
-        augment_prob=augment_prob,
-        use_cache=use_cache,
-        seed=seed
-    )
-    
-    # 创建模型
-    model = PreciseIntentClassifier(num_classes=len(train_labels))
-    model = model.to(DEVICE)
-    
-    # 定义损失函数和优化器
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    
-    # 训练历史记录
-    history = {
-        'train_loss': [],
-        'train_acc': []
-    }
-    
-    # 训练循环
-    for epoch in range(num_epochs):
-        # 训练模式
-        model.train()
-        running_loss = 0.0
-        correct = 0
-        total = 0
-        
-        # 进度条
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
-        
-        for batch in progress_bar:
-            # 获取输入和标签
-            input_ids = batch['input_ids'].to(DEVICE)
-            attention_mask = batch['attention_mask'].to(DEVICE)
-            labels = batch['label'].to(DEVICE)
-            
-            # 清零梯度
-            optimizer.zero_grad()
-            
-            # 前向传播
-            outputs = model(input_ids, attention_mask)
-            
-            # 计算损失
-            loss = criterion(outputs, labels)
-            
-            # 反向传播和优化
-            loss.backward()
-            optimizer.step()
-            
-            # 统计
-            running_loss += loss.item()
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-            
-            # 更新进度条
-            progress_bar.set_postfix({
-                'loss': loss.item(),
-                'acc': 100 * correct / total
-            })
-        
-        # 计算训练指标
-        epoch_loss = running_loss / len(train_loader)
-        epoch_acc = 100 * correct / total
-        
-        # 保存历史
-        history['train_loss'].append(epoch_loss)
-        history['train_acc'].append(epoch_acc)
-        
-        print(f"Epoch {epoch+1}/{num_epochs} - Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.2f}%")
-    
-    # 保存模型
-    os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
-    torch.save(model.state_dict(), model_save_path)
-    print(f"模型已保存到: {model_save_path}")
-    
-    # 绘制训练曲线
-    plot_training_curves(history, os.path.dirname(model_save_path), "precise", augment=augment)
-    
-    return model, history, train_labels
-"""
+    return model, train_labels
 
 def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs=NUM_EPOCHS,
                          pretrain_epochs=10, finetune_epochs=10, use_random_crop=True,
@@ -368,6 +248,48 @@ def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
+    
+    # 如果num_epochs为0，跳过训练过程，直接加载模型(如果存在)
+    if num_epochs == 0:
+        # 流式模型不需要特殊处理参数，直接获取意图标签
+        input_size = N_MFCC * 3
+        
+        # 尝试加载已有模型
+        if os.path.exists(model_save_path):
+            print(f"加载已有模型: {model_save_path}")
+            checkpoint = torch.load(model_save_path, map_location=torch.device('cpu'))
+            
+            # 检查是否是新的保存格式
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model_state = checkpoint['model_state_dict']
+                intent_labels = checkpoint['intent_labels']
+                model = FastIntentClassifier(input_size=input_size, num_classes=len(intent_labels))
+                model.load_state_dict(model_state)
+                print(f"模型加载成功，意图标签: {intent_labels}")
+                return model, intent_labels
+            else:
+                print("模型格式不兼容，需要先训练模型")
+                # 继续正常训练流程
+        else:
+            print(f"模型文件不存在: {model_save_path}")
+            print("无法跳过训练过程，请提供有效的模型文件或设置num_epochs > 0")
+            # 继续训练流程，但先获取标签
+            pretrain_loader, intent_labels = prepare_streaming_dataloader(
+                annotation_file=annotation_file,
+                data_dir=data_dir,
+                batch_size=1,  # 最小批次，仅用于获取标签
+                streaming_mode=False,
+                cache_dir=None
+            )
+            # 创建模型
+            model = FastIntentClassifier(input_size=input_size, num_classes=len(intent_labels))
+            # 保存模型
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'intent_labels': intent_labels
+            }, model_save_path)
+            print(f"已创建新模型并保存到: {model_save_path}")
+            return model, intent_labels
     
     # 设置缓存目录
     cache_dir = os.path.join("tmp", "feature_cache") if use_cache else None
@@ -613,7 +535,7 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
     
     Args:
         model_path: PyTorch模型路径
-        model_type: 模型类型 ('fast' 或 'precise')
+        model_type: 模型类型 ('fast')
         onnx_save_path: ONNX模型保存路径（如果为None则根据原模型路径生成）
         dynamic_axes: 是否使用动态轴（用于支持可变输入大小）
     
@@ -648,91 +570,45 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
         num_classes = len(INTENT_CLASSES)
         input_size = 39  # 默认值
     
-    if model_type == 'fast':
-        # 加载FastIntentClassifier模型
-        print(f"创建新的FastIntentClassifier实例，输入维度: {input_size}，类别数: {num_classes}")
-        model = FastIntentClassifier(input_size=input_size, num_classes=num_classes)
-        
-        # 加载保存的权重
-        print("加载模型权重")
-        model.load_state_dict(model_state)
-        model.to(device)
-        model.eval()
-        
-        # 创建示例输入（支持批量输入和单个输入）
-        dummy_input = torch.randn(1, 500, input_size, device=device)  # 批量大小为1，序列长度为500
-        
-        # 定义ONNX导出的输入和输出名称
-        input_names = ["input"]
-        output_names = ["output"]
-        
-        # 定义动态轴（如果需要）
-        dynamic_axes_dict = None
-        if dynamic_axes:
-            dynamic_axes_dict = {
-                'input': {0: 'batch_size', 1: 'sequence_length'},  # 动态批量大小和序列长度
-                'output': {0: 'batch_size'}
-            }
-        
-        # 导出模型
-        print(f"导出模型到 {onnx_save_path}")
-        torch.onnx.export(
-            model,
-            dummy_input,
-            onnx_save_path,
-            input_names=input_names,
-            output_names=output_names,
-            dynamic_axes=dynamic_axes_dict,
-            export_params=True,
-            opset_version=13,  # 使用更高版本的opset支持更多操作
-            do_constant_folding=True,
-            verbose=False
-        )
+    # 加载FastIntentClassifier模型
+    print(f"创建新的FastIntentClassifier实例，输入维度: {input_size}，类别数: {num_classes}")
+    model = FastIntentClassifier(input_size=input_size, num_classes=num_classes)
     
-    elif model_type == 'precise':
-        # 加载PreciseIntentClassifier模型
-        model = PreciseIntentClassifier(num_classes=num_classes)
-        
-        # 加载保存的权重
-        model.load_state_dict(model_state)
-        model.to(device)
-        model.eval()
-        
-        # 创建示例输入
-        # 假设我们使用的最大序列长度为128
-        max_length = 128
-        dummy_input_ids = torch.randint(0, 30522, (1, max_length), device=device)  # 批量大小为1，序列长度为max_length
-        dummy_attention_mask = torch.ones((1, max_length), device=device)
-        
-        # 定义ONNX导出的输入和输出名称
-        input_names = ["input_ids", "attention_mask"]
-        output_names = ["output"]
-        
-        # 定义动态轴（如果需要）
-        dynamic_axes_dict = None
-        if dynamic_axes:
-            dynamic_axes_dict = {
-                'input_ids': {0: 'batch_size', 1: 'sequence_length'},
-                'attention_mask': {0: 'batch_size', 1: 'sequence_length'},
-                'output': {0: 'batch_size'}
-            }
-        
-        # 导出模型
-        torch.onnx.export(
-            model,
-            (dummy_input_ids, dummy_attention_mask),
-            onnx_save_path,
-            input_names=input_names,
-            output_names=output_names,
-            dynamic_axes=dynamic_axes_dict,
-            export_params=True,
-            opset_version=13,
-            do_constant_folding=True,
-            verbose=False
-        )
+    # 加载保存的权重
+    print("加载模型权重")
+    model.load_state_dict(model_state)
+    model.to(device)
+    model.eval()
     
-    else:
-        raise ValueError(f"不支持的模型类型: {model_type}")
+    # 创建示例输入（支持批量输入和单个输入）
+    dummy_input = torch.randn(1, 500, input_size, device=device)  # 批量大小为1，序列长度为500
+    
+    # 定义ONNX导出的输入和输出名称
+    input_names = ["input"]
+    output_names = ["output"]
+    
+    # 定义动态轴（如果需要）
+    dynamic_axes_dict = None
+    if dynamic_axes:
+        dynamic_axes_dict = {
+            'input': {0: 'batch_size', 1: 'sequence_length'},  # 动态批量大小和序列长度
+            'output': {0: 'batch_size'}
+        }
+    
+    # 导出模型
+    print(f"导出模型到 {onnx_save_path}")
+    torch.onnx.export(
+        model,
+        dummy_input,
+        onnx_save_path,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes_dict,
+        export_params=True,
+        opset_version=13,  # 使用更高版本的opset支持更多操作
+        do_constant_folding=True,
+        verbose=False
+    )
     
     print(f"模型已导出至: {onnx_save_path}")
     return onnx_save_path
@@ -742,17 +618,18 @@ def parse_args():
     parser = argparse.ArgumentParser(description="训练音频意图识别模型")
     parser.add_argument("--data_dir", type=str, default=DATA_DIR, help="数据目录")
     parser.add_argument("--annotation_file", type=str, required=True, help="标注文件")
-    parser.add_argument("--model_type", type=str, choices=["fast", "precise", "streaming"], default="fast", help="模型类型")
+    parser.add_argument("--model_type", type=str, choices=["fast", "streaming"], default="fast", help="模型类型")
     parser.add_argument("--model_save_path", type=str, required=True, help="模型保存路径")
     parser.add_argument("--num_epochs", type=int, default=NUM_EPOCHS, help="训练轮数")
-    parser.add_argument("--pre_train", action="store_true", help="是否进行预训练")
     parser.add_argument("--pre_train_epochs", type=int, default=10, help="预训练轮数")
-    parser.add_argument("--fine_tune", action="store_true", help="是否进行微调")
     parser.add_argument("--fine_tune_epochs", type=int, default=10, help="微调轮数")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--augment", action="store_true", help="是否使用数据增强")
     parser.add_argument("--augment_prob", type=float, default=0.5, help="数据增强概率")
     parser.add_argument("--use_cache", action="store_true", help="是否使用特征缓存")
+    parser.add_argument("--export_onnx", action="store_true", help="训练完成后导出为ONNX格式")
+    parser.add_argument("--onnx_save_path", type=str, default=None, help="ONNX模型保存路径")
+    parser.add_argument("--dynamic_axes", action="store_true", default=True, help="使用动态轴(支持可变输入大小)")
     
     return parser.parse_args()
 
@@ -776,18 +653,6 @@ def main():
             use_cache=args.use_cache,
             seed=args.seed
         )
-    # 注释掉train_precise_model调用，因为我们只关注流式训练
-    # elif args.model_type == "precise":
-    #     model, intent_labels = train_precise_model(
-    #         data_dir=args.data_dir,
-    #         annotation_file=args.annotation_file,
-    #         model_save_path=args.model_save_path,
-    #         num_epochs=args.num_epochs,
-    #         augment=args.augment,
-    #         augment_prob=args.augment_prob,
-    #         use_cache=args.use_cache,
-    #         seed=args.seed
-    #     )
     elif args.model_type == "streaming":
         model, intent_labels = train_streaming_model(
             data_dir=args.data_dir,
@@ -802,6 +667,16 @@ def main():
         )
     else:
         raise ValueError(f"不支持的模型类型: {args.model_type}")
+    
+    # 导出ONNX模型
+    if args.export_onnx:
+        print("\n开始导出模型为ONNX格式...")
+        export_model_to_onnx(
+            model_path=args.model_save_path,
+            model_type=args.model_type,
+            onnx_save_path=args.onnx_save_path,
+            dynamic_axes=args.dynamic_axes
+        )
     
     print("训练完成！")
 
