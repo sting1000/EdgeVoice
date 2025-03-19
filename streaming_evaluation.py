@@ -85,6 +85,7 @@ def evaluate_streaming_model(model, intent_labels, annotation_file, data_dir=DAT
     
     # 流式处理的延迟统计
     latencies = []
+    end_to_decision_times = []
     
     # 处理每个音频文件
     for idx, row in tqdm(df.iterrows(), total=len(df), desc="评估中"):
@@ -136,6 +137,10 @@ def evaluate_streaming_model(model, intent_labels, annotation_file, data_dir=DAT
             latency = decision_time
             latencies.append(latency)
             
+            # 计算从音频结束到决策的时间（负值表示在音频结束前做出决策）
+            end_to_decision_time = decision_time - start_time
+            end_to_decision_times.append(end_to_decision_time)
+            
             # 存储块预测结果
             chunk_predictions[row['file_path']] = file_predictions
             
@@ -174,17 +179,29 @@ def evaluate_streaming_model(model, intent_labels, annotation_file, data_dir=DAT
     # 分析每个句子的预测变化
     prediction_stability = analyze_prediction_stability(chunk_predictions, intent_labels)
     
+    # 检查是否有有效的预测结果
+    if not all_true_labels or not all_pred_labels:
+        print("警告：没有有效的预测结果，可能是由于处理音频文件时出错")
+        # 创建一个空的分类报告
+        report = {label: {'precision': 0, 'recall': 0, 'f1-score': 0, 'support': 0} for label in intent_labels}
+        report.update({'accuracy': 0, 'macro avg': {'precision': 0, 'recall': 0, 'f1-score': 0, 'support': 0},
+                      'weighted avg': {'precision': 0, 'recall': 0, 'f1-score': 0, 'support': 0}})
+        accuracy = 0
+    
     # 绘制混淆矩阵
-    cm = confusion_matrix(all_true_labels, all_pred_labels)
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-               xticklabels=intent_labels, yticklabels=intent_labels)
-    plt.xlabel('Predicted Label')
-    plt.ylabel('True Label')
-    plt.title('Confusion Matrix')
-    plt.tight_layout()
-    plt.savefig('streaming_confusion_matrix.png')
-    plt.close()
+    if all_true_labels and all_pred_labels:
+        cm = confusion_matrix(all_true_labels, all_pred_labels)
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                   xticklabels=intent_labels, yticklabels=intent_labels)
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
+        plt.title('Confusion Matrix')
+        plt.tight_layout()
+        plt.savefig('streaming_confusion_matrix.png')
+        plt.close()
+    else:
+        print("警告：无法绘制混淆矩阵，没有足够的预测结果")
     
     # 汇总指标
     metrics = {
@@ -192,6 +209,7 @@ def evaluate_streaming_model(model, intent_labels, annotation_file, data_dir=DAT
         'classification_report': report,
         'early_stopping_ratio': early_stopping_ratio,
         'average_latency': average_latency,
+        'average_end_to_decision_time': np.mean(end_to_decision_times) if end_to_decision_times else 0,
         'prediction_stability': prediction_stability
     }
     
@@ -211,6 +229,14 @@ def analyze_prediction_stability(chunk_predictions, intent_labels):
     # 存储指标
     prediction_changes = []
     final_confidence = []
+    
+    # 检查是否有预测数据
+    if not chunk_predictions:
+        print("警告：没有有效的预测数据用于稳定性分析")
+        return {
+            'average_changes': 0,
+            'average_final_confidence': 0
+        }
     
     # 分析每个文件
     for file_path, predictions in chunk_predictions.items():
@@ -235,15 +261,19 @@ def analyze_prediction_stability(chunk_predictions, intent_labels):
     avg_changes = np.mean(prediction_changes) if prediction_changes else 0
     avg_final_confidence = np.mean(final_confidence) if final_confidence else 0
     
-    # 绘制预测变化分布
-    plt.figure(figsize=(10, 5))
-    plt.hist(prediction_changes, bins=range(max(prediction_changes) + 2), alpha=0.7)
-    plt.xlabel('Prediction Changes')
-    plt.ylabel('File Count')
-    plt.title('Prediction Stability Analysis')
-    plt.grid(True, alpha=0.3)
-    plt.savefig('prediction_stability.png')
-    plt.close()
+    # 只在有数据时绘制图表
+    if prediction_changes:
+        # 绘制预测变化分布
+        plt.figure(figsize=(10, 5))
+        plt.hist(prediction_changes, bins=range(max(prediction_changes) + 2), alpha=0.7)
+        plt.xlabel('Prediction Changes')
+        plt.ylabel('File Count')
+        plt.title('Prediction Stability Analysis')
+        plt.grid(True, alpha=0.3)
+        plt.savefig('prediction_stability.png')
+        plt.close()
+    else:
+        print("警告：没有足够的预测变化数据来绘制稳定性分析图")
     
     return {
         'average_changes': avg_changes,
@@ -258,6 +288,13 @@ def plot_streaming_metrics(metrics, save_path='streaming_metrics.png'):
         metrics: 评估指标
         save_path: 保存路径
     """
+    # 检查是否有有效的评估指标
+    if metrics['accuracy'] == 0 and not any(metrics['classification_report'].get(label, {}).get('f1-score', 0) 
+                                          for label in metrics['classification_report'] 
+                                          if label not in ['accuracy', 'macro avg', 'weighted avg']):
+        print("警告：没有有效的评估指标数据，跳过绘图")
+        return
+    
     # 提取分类报告中的F1分数
     f1_scores = []
     classes = []
@@ -286,9 +323,11 @@ def plot_streaming_metrics(metrics, save_path='streaming_metrics.png'):
     plt.ylim(0, 1)
     plt.title('Overall Performance Metrics')
     
-    # 平均延迟（秒）
+    # 延迟时间（秒）
     plt.subplot(2, 2, 3)
-    plt.bar(['Average Delay'], [metrics['average_latency']], color='red')
+    delay_labels = ['Start-to-Decision', 'End-to-Decision']
+    delay_values = [metrics['average_latency'], metrics['average_end_to_decision_time']]
+    plt.bar(delay_labels, delay_values, color=['red', 'darkred'])
     plt.ylabel('Time (seconds)')
     plt.title('Average Decision Delay')
     
@@ -332,38 +371,45 @@ def main():
     
     # 评估模型
     print('开始评估流式模型...')
-    metrics = evaluate_streaming_model(
-        model=model,
-        intent_labels=intent_labels,
-        annotation_file=args.annotation_file,
-        data_dir=args.data_dir,
-        chunk_size=args.chunk_size,
-        step_size=args.step_size,
-        confidence_threshold=args.confidence_threshold,
-        use_majority_voting=not args.no_majority_voting,
-        device=device
-    )
-    
-    # 打印评估结果
-    print('\n评估结果:')
-    print(f'准确率: {metrics["accuracy"]:.4f}')
-    print(f'早停比例: {metrics["early_stopping_ratio"]:.4f}')
-    print(f'平均延迟: {metrics["average_latency"]:.4f} 秒')
-    print('\n类别报告:')
-    for label, values in metrics['classification_report'].items():
-        if isinstance(values, dict):
-            print(f'{label}: F1={values["f1-score"]:.4f}, Precision={values["precision"]:.4f}, Recall={values["recall"]:.4f}')
-    
-    # 预测稳定性
-    stability = metrics['prediction_stability']
-    print('\n预测稳定性:')
-    print(f'平均变化次数: {stability["average_changes"]:.2f}')
-    print(f'平均最终置信度: {stability["average_final_confidence"]:.4f}')
-    
-    # 绘制指标图表
-    plot_streaming_metrics(metrics)
-    print('\n评估图表已保存为 streaming_metrics.png 和 streaming_confusion_matrix.png')
-    print('预测稳定性分析已保存为 prediction_stability.png')
+    try:
+        metrics = evaluate_streaming_model(
+            model=model,
+            intent_labels=intent_labels,
+            annotation_file=args.annotation_file,
+            data_dir=args.data_dir,
+            chunk_size=args.chunk_size,
+            step_size=args.step_size,
+            confidence_threshold=args.confidence_threshold,
+            use_majority_voting=not args.no_majority_voting,
+            device=device
+        )
+        
+        # 打印评估结果
+        print('\n评估结果:')
+        print(f'准确率: {metrics["accuracy"]:.4f}')
+        print(f'早停比例: {metrics["early_stopping_ratio"]:.4f}')
+        print(f'从音频开始到决策的平均延迟: {metrics["average_latency"]:.4f} 秒')
+        print(f'从音频结束到决策的平均时间: {metrics["average_end_to_decision_time"]:.4f} 秒' + 
+              (' (负值表示在音频结束前已完成决策)' if metrics["average_end_to_decision_time"] < 0 else ''))
+        print('\n类别报告:')
+        for label, values in metrics['classification_report'].items():
+            if isinstance(values, dict):
+                print(f'{label}: F1={values["f1-score"]:.4f}, Precision={values["precision"]:.4f}, Recall={values["recall"]:.4f}')
+        
+        # 预测稳定性
+        stability = metrics['prediction_stability']
+        print('\n预测稳定性:')
+        print(f'平均变化次数: {stability["average_changes"]:.2f}')
+        print(f'平均最终置信度: {stability["average_final_confidence"]:.4f}')
+        
+        # 绘制指标图表
+        plot_streaming_metrics(metrics)
+        print('\n评估图表已保存为 streaming_metrics.png 和 streaming_confusion_matrix.png')
+        print('预测稳定性分析已保存为 prediction_stability.png')
+    except Exception as e:
+        print(f"评估过程中发生错误: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     main() 
