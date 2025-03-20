@@ -7,11 +7,42 @@ import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+from matplotlib.font_manager import FontProperties
 import seaborn as sns
 import librosa
 import librosa.display
 from pathlib import Path
 from collections import Counter
+
+# 检查系统中可用的中文字体
+def get_chinese_font():
+    # 尝试寻找可用的中文字体
+    chinese_fonts = ['SimHei', 'Microsoft YaHei', 'SimSun', 'NSimSun', 'FangSong', 'KaiTi']
+    for font in chinese_fonts:
+        try:
+            # 检查matplotlib是否找到该字体
+            font_path = fm.findfont(FontProperties(family=font), fallback_to_default=True)
+            if os.path.exists(font_path) and 'ttf' in font_path.lower():
+                return font
+        except Exception:
+            continue
+    # 如果找不到中文字体，返回None
+    return None
+
+# 获取可用的中文字体
+try:
+    chinese_font = get_chinese_font()
+    if chinese_font:
+        plt.rcParams['font.sans-serif'] = [chinese_font, 'DejaVu Sans', 'sans-serif']
+        print(f"使用中文字体: {chinese_font}")
+    else:
+        # 如果没有中文字体，仅使用英文标签
+        print("警告: 没有找到可用的中文字体，图表将使用英文标签")
+except Exception as e:
+    print(f"设置字体时出错: {e}")
+    
+plt.rcParams['axes.unicode_minus'] = False
 
 def load_dataset_info(annotation_file, data_dir=None):
     """
@@ -65,10 +96,11 @@ def plot_intent_distribution(df, output_path=None):
         output_path: 输出文件路径
     """
     plt.figure(figsize=(12, 6))
-    sns.countplot(x='intent', data=df, palette='viridis')
-    plt.title('意图类别分布')
-    plt.xlabel('意图类别')
-    plt.ylabel('样本数量')
+    # 修复 countplot 的使用方式
+    sns.countplot(x='intent', hue='intent', data=df, palette='viridis', legend=False)
+    plt.title('Intent Distribution')
+    plt.xlabel('Intent Class')
+    plt.ylabel('Sample Count')
     plt.xticks(rotation=45)
     
     if output_path:
@@ -94,9 +126,9 @@ def plot_audio_length_distribution(df, output_path=None):
     
     plt.figure(figsize=(12, 6))
     sns.histplot(df['audio_length'].dropna(), bins=20, kde=True)
-    plt.title('音频长度分布')
-    plt.xlabel('长度 (秒)')
-    plt.ylabel('样本数量')
+    plt.title('Audio Length Distribution')
+    plt.xlabel('Length (seconds)')
+    plt.ylabel('Sample Count')
     
     if output_path:
         plt.tight_layout()
@@ -117,17 +149,49 @@ def plot_speaker_demographics(df, output_path=None):
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     
-    # 性别分布
-    sns.countplot(x='gender', data=df, palette='Set2', ax=ax1)
-    ax1.set_title('性别分布')
-    ax1.set_xlabel('性别')
-    ax1.set_ylabel('样本数量')
+    # 处理中文标签问题 - 将中文标签替换为英文
+    # 创建数据副本避免修改原始数据
+    plot_df = df.copy()
     
-    # 年龄组分布
-    sns.countplot(x='age_group', data=df, palette='Set2', ax=ax2)
-    ax2.set_title('年龄组分布')
-    ax2.set_xlabel('年龄组')
-    ax2.set_ylabel('样本数量')
+    # 检查是否有中文标签，如果有则替换为英文
+    if 'gender' in plot_df.columns:
+        # 可能的中文性别标签映射
+        gender_mapping = {'男': 'Male', '女': 'Female', '未指定': 'Unspecified'}
+        for cn, en in gender_mapping.items():
+            if cn in plot_df['gender'].values:
+                plot_df['gender'] = plot_df['gender'].replace(cn, en)
+    
+    # 检查年龄组是否有中文
+    if 'age_group' in plot_df.columns and plot_df['age_group'].dtype == 'object':  # 只有字符串类型可能包含中文
+        age_group_mapping = {
+            '未指定': 'Unspecified',
+            '少年': 'Youth',
+            '青年': 'Young Adult',
+            '中年': 'Middle-aged',
+            '老年': 'Senior'
+        }
+        # 仅替换已知的中文标签
+        for cn, en in age_group_mapping.items():
+            if cn in plot_df['age_group'].values:
+                plot_df['age_group'] = plot_df['age_group'].replace(cn, en)
+    
+    # 性别分布 - 修复 countplot 的使用方式
+    if 'gender' in plot_df.columns:
+        sns.countplot(x='gender', hue='gender', data=plot_df, palette='Set2', ax=ax1, legend=False)
+        ax1.set_title('Gender Distribution')
+        ax1.set_xlabel('Gender')
+        ax1.set_ylabel('Sample Count')
+    else:
+        ax1.text(0.5, 0.5, 'No gender data available', ha='center', va='center')
+    
+    # 年龄组分布 - 修复 countplot 的使用方式
+    if 'age_group' in plot_df.columns:
+        sns.countplot(x='age_group', hue='age_group', data=plot_df, palette='Set2', ax=ax2, legend=False)
+        ax2.set_title('Age Group Distribution')
+        ax2.set_xlabel('Age Group')
+        ax2.set_ylabel('Sample Count')
+    else:
+        ax2.text(0.5, 0.5, 'No age group data available', ha='center', va='center')
     
     plt.tight_layout()
     
@@ -182,31 +246,31 @@ def generate_dataset_report(annotation_file, data_dir, output_dir='reports'):
     
     # 保存统计报告
     with open(os.path.join(output_dir, 'dataset_report.txt'), 'w', encoding='utf-8') as f:
-        f.write("=== EdgeVoice 语音数据集统计报告 ===\n\n")
-        f.write(f"总样本数: {total_samples}\n\n")
+        f.write("=== EdgeVoice Speech Dataset Statistics Report ===\n\n")
+        f.write(f"Total Samples: {total_samples}\n\n")
         
-        f.write("意图分布:\n")
+        f.write("Intent Distribution:\n")
         for intent, count in sorted(intent_counts.items(), key=lambda x: x[1], reverse=True):
             f.write(f"  {intent}: {count} ({count/total_samples*100:.1f}%)\n")
         
-        f.write("\n性别分布:\n")
+        f.write("\nGender Distribution:\n")
         for gender, count in gender_counts.items():
             f.write(f"  {gender}: {count} ({count/total_samples*100:.1f}%)\n")
         
-        f.write("\n环境分布:\n")
+        f.write("\nEnvironment Distribution:\n")
         for env, count in env_counts.items():
             f.write(f"  {env}: {count} ({count/total_samples*100:.1f}%)\n")
         
-        f.write("\n音频长度统计(秒):\n")
+        f.write("\nAudio Length Statistics (seconds):\n")
         for stat, value in audio_stats.items():
             f.write(f"  {stat}: {value:.2f}\n")
         
-        f.write("\n文件完整性检查:\n")
+        f.write("\nFile Integrity Check:\n")
         if 'file_exists' in df.columns:
             missing_files = df[~df['file_exists']].shape[0]
-            f.write(f"  缺失文件数: {missing_files}\n")
+            f.write(f"  Missing Files: {missing_files}\n")
     
-    print(f"报告已生成至: {output_dir}")
+    print(f"Report generated to: {output_dir}")
 
 def split_dataset(annotation_file, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, 
                  stratify=True, output_dir='split_data', random_seed=42):
