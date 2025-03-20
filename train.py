@@ -17,6 +17,9 @@ from models.fast_classifier import FastIntentClassifier
 import librosa
 import torch.onnx
 import pandas as pd
+import shutil
+import pickle
+import traceback
 
 def set_seed(seed=42):
     """设置随机种子以确保可重现性"""
@@ -385,7 +388,7 @@ def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs
     
     # 阶段2: 流式微调
     print("\n阶段2: 流式微调...")
-    # 准备流式数据加载器
+    # 准备流式数据加载器 - 增加num_workers来加速数据加载
     finetune_loader, _ = prepare_streaming_dataloader(
         annotation_file=annotation_file,
         data_dir=data_dir,
@@ -396,15 +399,20 @@ def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs
         shuffle=True,
         seed=seed
     )
-    
-    # 重置优化器
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE * 0.1)  # 降低学习率
-    
+
+    # 重置优化器 - 使用更大的学习率来加速收敛
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE * 0.2)  # 调整学习率
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=3, verbose=True, min_lr=1e-5)
+
     # 微调历史记录
     finetune_history = {
         'train_loss': [],
         'train_acc': []
     }
+
+    # 使用预热策略防止崩溃
+    warmup_epochs = 3
+    warmup_factor = 0.1  # 初始学习率的比例
     
     # 微调循环
     for epoch in range(finetune_epochs):
@@ -413,28 +421,37 @@ def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs
         correct = 0
         total = 0
         
+        # 在预热阶段使用更小的学习率
+        if epoch < warmup_epochs:
+            for g in optimizer.param_groups:
+                g['lr'] = LEARNING_RATE * warmup_factor * (epoch + 1) / warmup_epochs
+        
         # 使用tqdm进度条
         progress_bar = tqdm(finetune_loader, desc=f"微调 Epoch {epoch+1}/{finetune_epochs}")
         
         for features, labels in progress_bar:
+            # 将数据移至设备
             features, labels = features.to(device), labels.to(device)
             
             # 清零梯度
             optimizer.zero_grad()
             
-            # 前向传播
-            outputs = model(features)
-            
-            # 确保输出和标签形状匹配
-            if outputs.shape[0] != labels.shape[0]:
-                print(f"警告: 输出形状 {outputs.shape} 与标签形状 {labels.shape} 不匹配")
-                continue
-            
-            # 计算损失
-            loss = criterion(outputs, labels)
+            # 前向传播 - 使用 torch.cuda.amp 自动混合精度加速
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                outputs = model(features)
+                
+                # 确保输出和标签形状匹配
+                if outputs.shape[0] != labels.shape[0]:
+                    print(f"警告: 输出形状 {outputs.shape} 与标签形状 {labels.shape} 不匹配")
+                    continue
+                
+                # 计算损失
+                loss = criterion(outputs, labels)
             
             # 反向传播和优化
             loss.backward()
+            # 梯度裁剪，防止梯度爆炸
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             # 统计
@@ -446,7 +463,8 @@ def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs
             # 更新进度条
             progress_bar.set_postfix({
                 'loss': running_loss / (progress_bar.n + 1),
-                'acc': 100 * correct / total
+                'acc': 100 * correct / total,
+                'lr': optimizer.param_groups[0]['lr']
             })
         
         # 计算训练指标
@@ -458,6 +476,9 @@ def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs
         finetune_history['train_acc'].append(epoch_acc)
         
         print(f"微调 Epoch {epoch+1}/{finetune_epochs} - 损失: {epoch_loss:.4f}, 准确率: {epoch_acc:.2f}%")
+        
+        # 学习率调度
+        scheduler.step(epoch_loss)
     
     # 保存最终模型
     torch.save({
@@ -630,33 +651,46 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
 
 def parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description="训练音频意图识别模型")
-    parser.add_argument("--data_dir", type=str, default=DATA_DIR, help="数据目录")
-    parser.add_argument("--annotation_file", type=str, required=True, help="标注文件")
-    parser.add_argument("--model_type", type=str, choices=["fast", "streaming"], default="fast", help="模型类型")
+    parser = argparse.ArgumentParser(description="EdgeVoice语音命令分类模型训练")
+    parser.add_argument("--model_type", type=str, default="fast", choices=["fast", "streaming", "transformer"], 
+                     help="模型类型: fast, streaming, transformer")
+    parser.add_argument("--data_dir", type=str, default=DATA_DIR, help="音频数据目录")
+    parser.add_argument("--annotation_file", type=str, required=True, help="训练数据标注文件")
     parser.add_argument("--model_save_path", type=str, required=True, help="模型保存路径")
     parser.add_argument("--num_epochs", type=int, default=NUM_EPOCHS, help="训练轮数")
-    parser.add_argument("--pre_train_epochs", type=int, default=10, help="预训练轮数")
-    parser.add_argument("--fine_tune_epochs", type=int, default=10, help="微调轮数")
-    parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--augment", action="store_true", help="是否使用数据增强")
-    parser.add_argument("--augment_prob", type=float, default=0.5, help="数据增强概率")
-    parser.add_argument("--use_cache", action="store_true", help="是否使用特征缓存")
-    parser.add_argument("--export_onnx", action="store_true", help="训练完成后导出为ONNX格式")
-    parser.add_argument("--onnx_save_path", type=str, default=None, help="ONNX模型保存路径")
+    parser.add_argument("--augment_prob", type=float, default=0.5, help="增强概率")
+    parser.add_argument("--pre_train_epochs", type=int, default=10, help="预训练轮数(仅用于streaming模型)")
+    parser.add_argument("--fine_tune_epochs", type=int, default=10, help="微调轮数(仅用于streaming模型)")
+    parser.add_argument("--export_onnx", action="store_true", help="是否导出为ONNX格式")
+    parser.add_argument("--onnx_save_path", type=str, help="ONNX模型保存路径")
+    parser.add_argument("--clear_cache", action="store_true", help="是否清理特征缓存")
+    parser.add_argument("--use_cache", action="store_true", default=True, help="是否使用特征缓存")
+    parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--dynamic_axes", action="store_true", default=True, help="使用动态轴(支持可变输入大小)")
     
     return parser.parse_args()
 
 def main():
-    """主函数，处理命令行参数并执行训练"""
+    """主函数"""
+    # 解析命令行参数
     args = parse_args()
     
+    # 清理缓存目录
+    if args.clear_cache:
+        cache_dir = os.path.join("tmp", "feature_cache")
+        if os.path.exists(cache_dir):
+            print(f"清理特征缓存目录: {cache_dir}")
+            shutil.rmtree(cache_dir)
+            os.makedirs(cache_dir, exist_ok=True)
+    
+    # 训练模型
     print(f"训练模型类型: {args.model_type}")
     print(f"数据目录: {args.data_dir}")
     print(f"标注文件: {args.annotation_file}")
     print(f"模型保存路径: {args.model_save_path}")
     
+    # 根据模型类型选择训练函数
     if args.model_type == "fast":
         model, intent_labels = train_fast_model(
             data_dir=args.data_dir,
@@ -694,6 +728,155 @@ def main():
         )
     
     print("训练完成！")
+
+def evaluate_streaming_model(model, test_dataframe, device, save_path, 
+                        early_stopping_conf=0.8, weighted_majority=True):
+    """
+    评估流式模型，并保存评估结果
+    
+    Args:
+        model: 流式分类模型
+        test_dataframe: 测试数据DataFrame
+        device: 设备
+        save_path: 保存评估结果的路径
+        early_stopping_conf: 提前停止的置信度阈值
+        weighted_majority: 是否使用加权多数投票
+        
+    Returns:
+        accuracy: 准确率
+    """
+    try:
+        # 设置模型为评估模式
+        model.eval()
+        
+        # 初始化评估指标
+        true_labels = []
+        pred_labels = []
+        latencies = []
+        early_stopping_stats = []
+        processing_errors = 0
+        
+        # 遍历测试数据
+        for idx, row in test_dataframe.iterrows():
+            file_path = row["file_path"]
+            label = row["intent"]
+            
+            try:
+                # 加载音频
+                audio, sr = librosa.load(file_path, sr=TARGET_SAMPLE_RATE)
+                
+                # 提取chunk特征
+                chunk_features, _ = streaming_feature_extractor(audio, sr, chunk_size, step_size)
+                
+                if len(chunk_features) == 0:
+                    print(f"警告: 文件没有提取到有效特征: {file_path}, 跳过评估")
+                    continue
+                    
+                # 初始化模型状态
+                cached_states = None
+                file_predictions = []
+                
+                # 模拟流式处理
+                early_stopped = False
+                start_time = len(audio) / sr  # 音频总时长
+                decision_time = start_time
+                
+                for i, features in enumerate(chunk_features):
+                    features_tensor = torch.FloatTensor(features).unsqueeze(0).to(device)
+                    
+                    with torch.no_grad():
+                        # 使用流式前向传播
+                        pred, conf, cached_states = model.predict_streaming(features_tensor, cached_states)
+                        
+                        # 记录预测结果
+                        pred_label = pred.item()
+                        confidence = conf.item()
+                        file_predictions.append((pred_label, confidence))
+                        
+                        # 计算当前时间点
+                        current_time = (i * step_size * HOP_LENGTH) / sr
+                        
+                        # 检查是否满足早停条件
+                        if confidence > early_stopping_conf:
+                            decision_time = current_time
+                            early_stopped = True
+                            break
+                
+                # 如果没有预测，跳过
+                if len(file_predictions) == 0:
+                    print(f"警告: 文件没有生成预测: {file_path}, 跳过评估")
+                    continue
+                
+                # 计算潜伏期（从开始到决策的时间）
+                latency = decision_time
+                latencies.append(latency)
+                early_stopping_stats.append(1 if early_stopped else 0)
+                
+                # 确定最终预测结果
+                if weighted_majority and len(file_predictions) > 1:
+                    # 加权多数投票 (按置信度加权)
+                    label_votes = {}
+                    for pred_label, confidence in file_predictions:
+                        if pred_label not in label_votes:
+                            label_votes[pred_label] = 0
+                        label_votes[pred_label] += confidence
+                    
+                    final_pred = max(label_votes.items(), key=lambda x: x[1])[0]
+                else:
+                    # 使用最后一个预测
+                    final_pred = file_predictions[-1][0]
+                
+                # 记录真实标签和预测标签
+                true_labels.append(label)
+                pred_labels.append(final_pred)
+                
+            except Exception as e:
+                print(f"处理文件时出错: {file_path}, 错误: {str(e)}")
+                processing_errors += 1
+                continue
+        
+        # 计算准确率
+        if len(true_labels) == 0:
+            print("警告: 没有成功处理任何测试文件，无法计算准确率")
+            return 0.0
+            
+        accuracy = accuracy_score(true_labels, pred_labels)
+        
+        # 计算平均潜伏期
+        avg_latency = np.mean(latencies) if latencies else float('nan')
+        early_stopping_rate = np.mean(early_stopping_stats) if early_stopping_stats else float('nan')
+        
+        # 打印评估结果
+        print(f"流式评估结果:")
+        print(f"  准确率: {accuracy:.4f}")
+        print(f"  平均潜伏期: {avg_latency:.4f}秒")
+        print(f"  早停率: {early_stopping_rate:.4f}")
+        print(f"  处理错误数: {processing_errors}")
+        
+        # 保存评估结果
+        eval_results = {
+            "accuracy": accuracy,
+            "avg_latency": avg_latency,
+            "early_stopping_rate": early_stopping_rate,
+            "processing_errors": processing_errors,
+            "true_labels": true_labels,
+            "pred_labels": pred_labels,
+            "latencies": latencies
+        }
+        
+        # 确保目录存在
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        # 保存评估结果
+        with open(save_path, 'wb') as f:
+            pickle.dump(eval_results, f)
+        
+        return accuracy
+        
+    except Exception as e:
+        print(f"评估过程中出错: {str(e)}")
+        traceback.print_exc()
+        return 0.0
 
 if __name__ == "__main__":
     main()

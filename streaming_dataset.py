@@ -117,10 +117,16 @@ class StreamingAudioDataset(Dataset):
         
         if cached_data is not None:
             if self.streaming_mode:
-                return {
-                    'chunk_features': cached_data['chunk_features'],
-                    'label': label_id
-                }
+                # 对缓存结果进行额外验证
+                if len(cached_data.get('chunk_features', [])) == 0:
+                    # 缓存数据异常，重新生成
+                    print(f"警告: ID={idx} 的缓存特征无效，重新生成")
+                    # 继续执行未缓存的逻辑
+                else:
+                    return {
+                        'chunk_features': cached_data['chunk_features'],
+                        'label': label_id
+                    }
             else:
                 return {
                     'features': cached_data['features'],
@@ -132,7 +138,7 @@ class StreamingAudioDataset(Dataset):
         
         if self.streaming_mode:
             # 流式模式：提取分块特征
-            chunk_features = streaming_feature_extractor(
+            chunk_features, _ = streaming_feature_extractor(
                 audio, sr, self.chunk_size, self.step_size
             )
             
@@ -169,21 +175,40 @@ def collate_streaming_batch(batch):
     """
     流式模式的批处理函数
     处理不同长度的特征序列，保持批大小不变
+    优化后的版本，减少内存复制和转换开销
     """
     # 为每个样本收集所有块特征
     all_features = []
     all_labels = []
     
+    # 优化：预分配最大可能的空间
+    max_items = len(batch)
+    all_features = [None] * max_items
+    all_labels = [None] * max_items
+    
+    # 填充实际有效的项目
+    valid_count = 0
     for item in batch:
         # 如果样本有多个chunk，我们只使用第一个
         # 这样可以保持批大小不变
         if len(item['chunk_features']) > 0:
-            all_features.append(item['chunk_features'][0])
-            all_labels.append(item['label'])
+            all_features[valid_count] = item['chunk_features'][0]
+            all_labels[valid_count] = item['label']
+            valid_count += 1
     
-    # 转换为tensor
-    features = torch.FloatTensor(np.array(all_features))
-    labels = torch.LongTensor(all_labels)
+    # 如果有无效样本，调整列表大小
+    if valid_count < max_items:
+        all_features = all_features[:valid_count]
+        all_labels = all_labels[:valid_count]
+    
+    # 如果没有有效样本，返回空批次
+    if valid_count == 0:
+        return torch.FloatTensor(), torch.LongTensor()
+    
+    # 批量转换为numpy数组，然后一次性转为tensor，减少多次转换开销
+    features = np.stack(all_features)
+    features = torch.from_numpy(features).float()
+    labels = torch.tensor(all_labels, dtype=torch.long)
     
     return features, labels
 
@@ -254,14 +279,16 @@ def prepare_streaming_dataloader(annotation_file, data_dir=DATA_DIR, batch_size=
     # 选择正确的批处理函数
     collate_fn = collate_streaming_batch if streaming_mode else collate_full_batch
     
-    # 创建数据加载器
+    # 创建数据加载器 - 增加多进程加载和预取，提高数据加载效率
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         collate_fn=collate_fn,
-        num_workers=0,  # 可根据系统调整
-        pin_memory=torch.cuda.is_available()
+        num_workers=4,  # 增加工作进程数量
+        pin_memory=torch.cuda.is_available(),
+        prefetch_factor=2,  # 预取因子
+        persistent_workers=True  # 保持工作进程存活
     )
     
     return dataloader, dataset.intent_labels 

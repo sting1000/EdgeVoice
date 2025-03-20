@@ -1,17 +1,19 @@
 #!/bin/bash
 
-# 创建必要的目录
+# 清理缓存，避免使用旧的特征缓存
+echo "清理特征缓存..."
+rm -rf tmp/feature_cache
 mkdir -p tmp/feature_cache
 mkdir -p saved_models
 
 # 设置训练参数
-ANNOTATION_FILE="data/train_annotations.csv"
-TEST_ANNOTATION_FILE="data/test_annotations.csv"
+ANNOTATION_FILE="data/split/train_annotations.csv"
+TEST_ANNOTATION_FILE="data/split/test_annotations.csv"
 DATA_DIR="data"
 MODEL_SAVE_PATH="saved_models/streaming_model.pt"
 # 恢复正常的训练轮数
-PRETRAIN_EPOCHS=5
-FINETUNE_EPOCHS=5
+PRETRAIN_EPOCHS=20
+FINETUNE_EPOCHS=20
 TOTAL_EPOCHS=$((PRETRAIN_EPOCHS + FINETUNE_EPOCHS))
 ONNX_SAVE_PATH="saved_models/streaming_model.onnx"
 echo "========================================"
@@ -20,6 +22,11 @@ echo "预训练轮数: $PRETRAIN_EPOCHS"
 echo "微调轮数: $FINETUNE_EPOCHS"
 echo "总轮数: $TOTAL_EPOCHS"
 echo "========================================"
+
+# 设置环境变量以优化性能
+export CUDA_VISIBLE_DEVICES=0  # 使用指定GPU
+export OMP_NUM_THREADS=8       # 优化OpenMP线程数
+export MKL_NUM_THREADS=8       # 优化MKL线程数
 
 # 执行两阶段流式训练
 python train.py \

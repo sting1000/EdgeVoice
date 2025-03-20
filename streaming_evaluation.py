@@ -96,16 +96,21 @@ def evaluate_streaming_model(model, intent_labels, annotation_file, data_dir=DAT
             # 加载音频
             audio, sr = librosa.load(file_path, sr=TARGET_SAMPLE_RATE)
             
-            # 提取流式特征
-            chunk_features = streaming_feature_extractor(audio, sr, chunk_size, step_size)
+            # 提取chunk特征
+            try:
+                # 尝试解包两个返回值
+                chunk_features, _ = streaming_feature_extractor(audio, sr, chunk_size, step_size)
+            except ValueError:
+                # 如果返回一个值，则直接赋值给chunk_features
+                chunk_features = streaming_feature_extractor(audio, sr, chunk_size, step_size)
             
             if len(chunk_features) == 0:
-                # 没有有效特征，跳过该文件
+                print(f"警告: 文件没有提取到有效特征: {file_path}, 跳过评估")
                 continue
-            
-            # 存储每个块的预测
-            file_predictions = []
+                
+            # 初始化模型状态
             cached_states = None
+            file_predictions = []
             
             # 模拟流式处理
             early_stopped = False
@@ -113,26 +118,49 @@ def evaluate_streaming_model(model, intent_labels, annotation_file, data_dir=DAT
             decision_time = start_time
             
             for i, features in enumerate(chunk_features):
-                features_tensor = torch.FloatTensor(features).unsqueeze(0).to(device)
+                # 安全检查
+                if features is None or len(features) == 0:
+                    print(f"警告: 跳过空特征块 {i} (文件: {file_path})")
+                    continue
+                    
+                try:
+                    features_tensor = torch.FloatTensor(features).unsqueeze(0).to(device)
+                    
+                    with torch.no_grad():
+                        # 使用安全的前向传播
+                        try:
+                            # 尝试获取3个返回值
+                            pred, conf, cached_states = model.predict_streaming(features_tensor, cached_states)
+                        except ValueError as e:
+                            print(f"处理块 {i} 时出错 (文件: {file_path}): {e}")
+                            # 尝试只获取两个返回值
+                            pred, conf = model.predict_streaming(features_tensor, cached_states)
+                            # 保留前一个缓存状态
+                        
+                        # 记录预测结果
+                        pred_label = pred.item()
+                        confidence = conf.item()
+                        file_predictions.append((pred_label, confidence))
+                        
+                        # 计算当前时间点
+                        current_time = (i * step_size * HOP_LENGTH) / sr
+                        
+                        # 检查是否满足早停条件
+                        if confidence > confidence_threshold and not early_stopped:
+                            early_stopped = True
+                            decision_time = current_time
+                            early_stopping_count += 1
                 
-                with torch.no_grad():
-                    # 使用流式前向传播
-                    pred, conf, cached_states = model.predict_streaming(features_tensor, cached_states)
-                    
-                    # 记录预测结果
-                    pred_label = pred.item()
-                    confidence = conf.item()
-                    file_predictions.append((pred_label, confidence))
-                    
-                    # 计算当前时间点
-                    current_time = (i * step_size * HOP_LENGTH) / sr
-                    
-                    # 检查是否满足早停条件
-                    if confidence > confidence_threshold and not early_stopped:
-                        early_stopped = True
-                        decision_time = current_time
-                        early_stopping_count += 1
+                except Exception as e:
+                    print(f"处理块 {i} 时出错 (文件: {file_path}): {e}")
+                    # 跳过有问题的块
+                    continue
             
+            # 如果没有有效预测，跳过
+            if not file_predictions:
+                print(f"警告: 文件没有生成有效预测: {file_path}, 跳过评估")
+                continue
+                
             # 计算延迟（从音频开始到得出决策的时间）
             latency = decision_time
             latencies.append(latency)

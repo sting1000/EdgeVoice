@@ -216,6 +216,7 @@ def extract_features(audio, sr, n_mfcc=N_MFCC):
 def extract_features_streaming(audio_chunk, sr, n_mfcc=N_MFCC, prev_frames=None):
     """
     流式提取MFCC特征，适用于实时处理
+    增强版本，提升健壮性
     
     Args:
         audio_chunk: 当前音频数据块
@@ -234,8 +235,19 @@ def extract_features_streaming(audio_chunk, sr, n_mfcc=N_MFCC, prev_frames=None)
     # 需要2帧上下文来计算delta
     context_size = 2
     
+    # 处理空音频输入
+    if len(audio_chunk) == 0:
+        empty_features = np.zeros((1, n_mfcc * 3))
+        return empty_features, np.zeros(HOP_LENGTH * context_size)
+    
+    # 确保音频长度足够
+    min_len = HOP_LENGTH * 3  # 至少需要3帧
+    if len(audio_chunk) < min_len:
+        # 填充
+        audio_chunk = np.pad(audio_chunk, (0, min_len - len(audio_chunk)))
+    
     # 如果有前一时刻的帧，拼接以保证Delta计算的连续性
-    if prev_frames is not None:
+    if prev_frames is not None and len(prev_frames) > 0:
         audio_with_context = np.concatenate([prev_frames, audio_chunk])
         
         # 提取MFCC
@@ -247,25 +259,51 @@ def extract_features_streaming(audio_chunk, sr, n_mfcc=N_MFCC, prev_frames=None)
             hop_length=HOP_LENGTH
         )
         
-        # 计算差分特征（对于小批量音频使用较小的宽度）
-        width = min(3, mfcc.shape[1] - 2)  # 确保宽度不超过特征长度
-        delta = librosa.feature.delta(mfcc, width=width, order=1)
-        delta2 = librosa.feature.delta(mfcc, width=width, order=2)
-        
-        # 转置和拼接
-        mfcc = mfcc.T
-        delta = delta.T
-        delta2 = delta2.T
-        
-        # 只取当前块对应的帧
-        # 计算前一块对应的帧数
-        prev_frames_count = int(len(prev_frames) / HOP_LENGTH)
-        
-        # 去除上下文帧
-        mfcc = mfcc[prev_frames_count:]
-        delta = delta[prev_frames_count:]
-        delta2 = delta2[prev_frames_count:]
-        
+        # 确保生成了足够的帧
+        if mfcc.shape[1] < 3:
+            # 不够帧，退化为没有上下文的处理方式
+            mfcc = librosa.feature.mfcc(
+                y=audio_chunk, 
+                sr=TARGET_SAMPLE_RATE,
+                n_mfcc=n_mfcc,
+                n_fft=N_FFT,
+                hop_length=HOP_LENGTH
+            )
+            # 判断是否有足够的帧计算delta
+            if mfcc.shape[1] >= 3:
+                delta = librosa.feature.delta(mfcc, width=3, order=1)
+                delta2 = librosa.feature.delta(mfcc, width=3, order=2)
+            else:
+                # 仍然不够，创建零矩阵
+                delta = np.zeros_like(mfcc)
+                delta2 = np.zeros_like(mfcc)
+                
+            mfcc = mfcc.T
+            delta = delta.T
+            delta2 = delta2.T
+        else:
+            # 计算差分特征（对于小批量音频使用较小的宽度）
+            width = min(3, mfcc.shape[1] - 2)  # 确保宽度不超过特征长度
+            delta = librosa.feature.delta(mfcc, width=width, order=1)
+            delta2 = librosa.feature.delta(mfcc, width=width, order=2)
+            
+            # 转置和拼接
+            mfcc = mfcc.T
+            delta = delta.T
+            delta2 = delta2.T
+            
+            # 只取当前块对应的帧
+            # 计算前一块对应的帧数
+            prev_frames_count = int(len(prev_frames) / HOP_LENGTH)
+            
+            # 如果帧数计算不准确，采用安全措施
+            if prev_frames_count >= mfcc.shape[0]:
+                prev_frames_count = max(0, mfcc.shape[0] - 1)
+            
+            # 去除上下文帧
+            mfcc = mfcc[prev_frames_count:]
+            delta = delta[prev_frames_count:]
+            delta2 = delta2[prev_frames_count:]
     else:
         # 首次处理，没有上下文帧
         mfcc = librosa.feature.mfcc(
@@ -292,6 +330,10 @@ def extract_features_streaming(audio_chunk, sr, n_mfcc=N_MFCC, prev_frames=None)
     
     # 合并特征
     features = np.hstack((mfcc, delta, delta2))
+    
+    # 如果特征为空，创建一个默认特征
+    if features.shape[0] == 0:
+        features = np.zeros((1, n_mfcc * 3))
     
     # 保存最后context_size帧的音频数据，用于下一块处理
     context_samples = int(context_size * HOP_LENGTH)
@@ -405,21 +447,36 @@ def streaming_feature_extractor(audio, sr, chunk_size=STREAMING_CHUNK_SIZE, step
                 # 跳过非最后一块但长度不足的情况
                 continue
         
-        # 提取流式特征
-        try:
-            features, prev_frames = extract_features_streaming(audio_chunk, sr, prev_frames=prev_frames)
-            
-            # 添加到结果列表
-            if len(features) > 0:  # 确保提取到了有效特征
-                chunk_features.append(features)
-        except Exception as e:
-            print(f"处理音频块时出错: {e}")
-            # 跳过处理错误的块
-            continue
+        # 提取流式特征 - 使用安全版本
+        features, prev_frames = safe_extract_features_streaming(audio_chunk, sr, prev_frames=prev_frames)
+        
+        # 添加到结果列表
+        if len(features) > 0:  # 确保提取到了有效特征
+            chunk_features.append(features)
     
     # 确保至少有一个特征块
     if len(chunk_features) == 0:
         # 创建一个默认特征块
         chunk_features = [np.zeros((1, N_MFCC * 3))]
     
-    return chunk_features 
+    return chunk_features, None
+
+def safe_extract_features_streaming(audio_chunk, sr, prev_frames=None):
+    """
+    安全地调用extract_features_streaming，确保总是返回正确的元组
+    
+    Args:
+        audio_chunk: 当前音频数据块
+        sr: 采样率
+        prev_frames: 前一时刻的特征帧
+        
+    Returns:
+        (features, last_frames): 即使发生错误也保证返回两个值的元组
+    """
+    try:
+        return extract_features_streaming(audio_chunk, sr, prev_frames=prev_frames)
+    except Exception as e:
+        print(f"特征提取错误 (安全处理): {e}")
+        # 返回默认值
+        empty_features = np.zeros((1, N_MFCC * 3))
+        return empty_features, audio_chunk[-min(len(audio_chunk), HOP_LENGTH*2):] if len(audio_chunk) > 0 else np.zeros(HOP_LENGTH*2) 
