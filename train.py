@@ -344,11 +344,12 @@ def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs
             # 清零梯度
             optimizer.zero_grad()
             
-            # 前向传播
-            outputs = model(features)
-            
-            # 计算损失
-            loss = criterion(outputs, labels)
+            # 前向传播 - 使用 torch.amp 自动混合精度加速
+            with torch.amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+                outputs = model(features)
+                
+                # 计算损失
+                loss = criterion(outputs, labels)
             
             # 反向传播和优化
             loss.backward()
@@ -388,17 +389,11 @@ def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs
     
     # 阶段2: 流式微调
     print("\n阶段2: 流式微调...")
-    # 准备流式数据加载器 - 增加num_workers来加速数据加载
-    finetune_loader, _ = prepare_streaming_dataloader(
-        annotation_file=annotation_file,
-        data_dir=data_dir,
-        batch_size=BATCH_SIZE,
-        streaming_mode=True,  # 流式模式
-        use_random_crop=False,  # 流式模式不需要随机裁剪
-        cache_dir=cache_dir,
-        shuffle=True,
-        seed=seed
-    )
+    
+    # 创建流式特征的专用缓存目录
+    stream_cache_dir = os.path.join(cache_dir, "streaming_features") if cache_dir else None
+    if stream_cache_dir:
+        os.makedirs(stream_cache_dir, exist_ok=True)
 
     # 重置优化器 - 使用更大的学习率来加速收敛
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE * 0.2)  # 调整学习率
@@ -414,8 +409,40 @@ def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs
     warmup_epochs = 3
     warmup_factor = 0.1  # 初始学习率的比例
     
+    # 设置特征抖动参数 - 随着训练进行逐渐减小抖动
+    jitter_start = 0.04  # 初始抖动强度
+    jitter_end = 0.01    # 最终抖动强度
+    
     # 微调循环
     for epoch in range(finetune_epochs):
+        # 计算当前epoch的抖动比例 - 线性衰减
+        current_jitter = jitter_start - (jitter_start - jitter_end) * min(1.0, epoch / (finetune_epochs * 0.7))
+        
+        # 每个epoch清除流式特征缓存，确保重新生成流式特征
+        if epoch > 0 and stream_cache_dir and os.path.exists(stream_cache_dir):
+            print(f"清除流式特征缓存，确保重新生成特征...")
+            # 清除流式特征缓存目录内容
+            for cache_file in os.listdir(stream_cache_dir):
+                os.remove(os.path.join(stream_cache_dir, cache_file))
+        
+        # 每个epoch重新准备流式数据加载器
+        epoch_cache_dir = None if epoch > 0 else stream_cache_dir  # 只有第一轮使用缓存
+        finetune_loader, _ = prepare_streaming_dataloader(
+            annotation_file=annotation_file,
+            data_dir=data_dir,
+            batch_size=BATCH_SIZE,
+            streaming_mode=True,  # 流式模式
+            use_random_crop=False,  # 流式模式不需要随机裁剪
+            cache_dir=epoch_cache_dir,
+            shuffle=True,
+            seed=seed + epoch,  # 每轮使用不同随机种子
+            use_feature_augmentation=True,  # 启用特征增强
+            jitter_ratio=current_jitter,  # 使用动态抖动比例
+            mask_ratio=0.05  # 固定掩码比例
+        )
+        
+        print(f"微调 Epoch {epoch+1}/{finetune_epochs} - 使用特征抖动 {current_jitter:.4f}")
+        
         model.train()
         running_loss = 0.0
         correct = 0
@@ -436,8 +463,8 @@ def train_streaming_model(data_dir, annotation_file, model_save_path, num_epochs
             # 清零梯度
             optimizer.zero_grad()
             
-            # 前向传播 - 使用 torch.cuda.amp 自动混合精度加速
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            # 前向传播 - 使用 torch.amp 自动混合精度加速
+            with torch.amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
                 outputs = model(features)
                 
                 # 确保输出和标签形状匹配

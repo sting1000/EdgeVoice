@@ -196,7 +196,8 @@ def evaluate_streaming_model(model, intent_labels, annotation_file, data_dir=DAT
     # 计算评估指标
     accuracy = accuracy_score(all_true_labels, all_pred_labels)
     report = classification_report(all_true_labels, all_pred_labels, 
-                                  target_names=intent_labels, output_dict=True)
+                                  target_names=intent_labels, output_dict=True,
+                                  zero_division=0)
     
     # 计算早停比例
     early_stopping_ratio = early_stopping_count / len(df) if len(df) > 0 else 0

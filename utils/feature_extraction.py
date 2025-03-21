@@ -401,7 +401,7 @@ def random_crop_audio(audio, sr, min_duration=0.5, max_duration=3.0):
     
     return cropped_audio
 
-def streaming_feature_extractor(audio, sr, chunk_size=STREAMING_CHUNK_SIZE, step_size=STREAMING_STEP_SIZE):
+def streaming_feature_extractor(audio, sr, chunk_size=STREAMING_CHUNK_SIZE, step_size=STREAMING_STEP_SIZE, force_recalculate=False):
     """
     模拟流式处理，逐块提取特征
     
@@ -410,6 +410,7 @@ def streaming_feature_extractor(audio, sr, chunk_size=STREAMING_CHUNK_SIZE, step
         sr: 采样率
         chunk_size: 每个块的帧数
         step_size: 处理步长(帧数)
+        force_recalculate: 是否强制重新计算特征，不使用缓存
         
     Returns:
         chunk_features: 列表，包含每个块的特征
@@ -417,6 +418,20 @@ def streaming_feature_extractor(audio, sr, chunk_size=STREAMING_CHUNK_SIZE, step
     # 确保采样率一致
     if sr != TARGET_SAMPLE_RATE:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=TARGET_SAMPLE_RATE)
+    
+    # 生成唯一标识用于缓存
+    if not force_recalculate:
+        # 尝试使用音频数据的哈希作为键
+        try:
+            audio_hash = hash(audio.tobytes()) % 10000000
+            cache_key = f"stream_{audio_hash}_{chunk_size}_{step_size}"
+            
+            # 检查是否有缓存
+            if hasattr(streaming_feature_extractor, "cache") and cache_key in streaming_feature_extractor.cache:
+                return streaming_feature_extractor.cache[cache_key], None
+        except:
+            # 如果哈希出错，忽略缓存
+            pass
     
     # 计算块大小和步长(采样点数)
     chunk_samples = int(chunk_size * HOP_LENGTH)
@@ -459,6 +474,20 @@ def streaming_feature_extractor(audio, sr, chunk_size=STREAMING_CHUNK_SIZE, step
         # 创建一个默认特征块
         chunk_features = [np.zeros((1, N_MFCC * 3))]
     
+    # 缓存结果，除非强制重新计算
+    if not force_recalculate:
+        try:
+            # 创建缓存字典(如果不存在)
+            if not hasattr(streaming_feature_extractor, "cache"):
+                streaming_feature_extractor.cache = {}
+            
+            # 保存到缓存(最多保存100个缓存项)
+            if len(streaming_feature_extractor.cache) < 100:
+                streaming_feature_extractor.cache[cache_key] = chunk_features
+        except:
+            # 如果缓存失败，忽略错误
+            pass
+    
     return chunk_features, None
 
 def safe_extract_features_streaming(audio_chunk, sr, prev_frames=None):
@@ -480,3 +509,47 @@ def safe_extract_features_streaming(audio_chunk, sr, prev_frames=None):
         # 返回默认值
         empty_features = np.zeros((1, N_MFCC * 3))
         return empty_features, audio_chunk[-min(len(audio_chunk), HOP_LENGTH*2):] if len(audio_chunk) > 0 else np.zeros(HOP_LENGTH*2) 
+
+def add_feature_jitter(features, jitter_ratio=0.01):
+    """
+    给特征添加随机抖动，提高模型鲁棒性
+    
+    Args:
+        features: 输入特征，形状为(time, features)
+        jitter_ratio: 抖动比例，控制噪声强度
+        
+    Returns:
+        添加抖动后的特征
+    """
+    if features is None or features.size == 0:
+        return features
+        
+    # 计算特征的标准差
+    feature_std = np.std(features, axis=0, keepdims=True)
+    # 生成随机噪声，噪声强度与特征标准差成比例
+    noise = np.random.randn(*features.shape) * feature_std * jitter_ratio
+    # 添加噪声
+    features_with_jitter = features + noise
+    
+    return features_with_jitter
+
+def add_feature_mask(features, mask_ratio=0.05):
+    """
+    随机掩盖一部分特征，类似dropout，提高鲁棒性
+    
+    Args:
+        features: 输入特征，形状为(time, features)
+        mask_ratio: 掩盖比例
+        
+    Returns:
+        掩盖后的特征
+    """
+    if features is None or features.size == 0:
+        return features
+        
+    # 创建掩码
+    mask = np.random.random(features.shape) > mask_ratio
+    # 应用掩码
+    features_masked = features * mask
+    
+    return features_masked 

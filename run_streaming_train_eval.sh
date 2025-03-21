@@ -11,9 +11,11 @@ ANNOTATION_FILE="data/split/train_annotations.csv"
 TEST_ANNOTATION_FILE="data/split/test_annotations.csv"
 DATA_DIR="data"
 MODEL_SAVE_PATH="saved_models/streaming_model.pt"
-# 恢复正常的训练轮数
-PRETRAIN_EPOCHS=20
-FINETUNE_EPOCHS=20
+
+# 设置训练轮数 - 测试环境使用较少轮数
+# 测试模式: 预训练和微调各5轮，生产环境可增加到30+轮
+PRETRAIN_EPOCHS=5
+FINETUNE_EPOCHS=10
 TOTAL_EPOCHS=$((PRETRAIN_EPOCHS + FINETUNE_EPOCHS))
 ONNX_SAVE_PATH="saved_models/streaming_model.onnx"
 echo "========================================"
@@ -65,9 +67,17 @@ if [ $? -eq 0 ]; then
     # 测试实时流式处理demo
     echo "========================================"
     echo "测试实时流式处理demo..."
-    python real_time_streaming_demo.py \
-      --model_path $MODEL_SAVE_PATH \
-      --buffer_size 1024
+    if [ -f "data/test_samples/test_audio.wav" ]; then
+        # 如果测试音频文件存在，使用文件方式测试
+        python real_time_streaming_demo.py \
+          --model_path $MODEL_SAVE_PATH \
+          --buffer_size 1024 \
+          --audio_file data/test_samples/test_audio.wav
+    else
+        # 如果是无头环境或无法使用麦克风，跳过这一步
+        echo "注意: 未找到默认测试音频文件，且未启用麦克风，跳过实时demo测试"
+        echo "可以在后续手动测试：python real_time_streaming_demo.py --model_path $MODEL_SAVE_PATH --use_mic"
+    fi
     
     echo "========================================"
     echo "所有任务完成!"
