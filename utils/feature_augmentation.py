@@ -1,8 +1,12 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 import torch
 import numpy as np
 import random
 from librosa.effects import time_stretch, pitch_shift
 import torch.nn.functional as F
+from config import *
 
 def augment_streaming_features(features, phase='train'):
     """针对流式特征的增强策略
@@ -101,16 +105,19 @@ def augment_streaming_features(features, phase='train'):
     return augmented
 
 def mixup_features(features, labels, alpha=0.2):
-    """MixUp数据增强
+    """
+    应用MixUp数据增强
     
     Args:
-        features: 特征张量 [batch_size, ...]
-        labels: 标签张量 [batch_size]
-        alpha: mixup强度参数
+        features: 输入特征 [batch_size, seq_len, feature_dim]
+        labels: 标签 [batch_size]
+        alpha: Beta分布参数
         
     Returns:
-        mixed_features: 混合特征
-        mixed_labels: 混合标签
+        mixed_features: 混合后的特征
+        labels_a: 第一组标签
+        labels_b: 第二组标签
+        lam: 混合系数
     """
     if alpha > 0:
         lam = np.random.beta(alpha, alpha)
@@ -118,12 +125,14 @@ def mixup_features(features, labels, alpha=0.2):
         lam = 1
     
     batch_size = features.size(0)
+    
+    # 生成随机索引，用于混合
     index = torch.randperm(batch_size).to(features.device)
     
-    # 混合特征
-    mixed_features = lam * features + (1 - lam) * features[index, ...]
+    # 特征混合
+    mixed_features = lam * features + (1 - lam) * features[index, :]
     
-    # 混合标签 - 返回混合标签和混合权重
+    # 返回原始标签和混合标签
     return mixed_features, labels, labels[index], lam
 
 def time_mask(features, max_mask_len=10, mask_num=2):
@@ -184,23 +193,183 @@ def add_gaussian_noise(features, mean=0, std=0.005):
     noise = torch.randn_like(features) * std + mean
     return features + noise
 
-def time_warp(features, max_warp=5):
-    """时间扭曲增强
+def time_warp(features, warp_factor=5):
+    """应用时间扭曲增强
     
     Args:
-        features: 特征张量 [batch_size, seq_len, feat_dim]
-        max_warp: 最大扭曲步长
+        features: 输入特征 [batch_size, seq_len, feature_dim]
+        warp_factor: 扭曲因子
         
     Returns:
         warped_features: 扭曲后的特征
     """
-    batch_size, seq_len, feat_dim = features.shape
-    if seq_len < 10:  # 序列太短，避免扭曲
-        return features
+    if isinstance(features, np.ndarray):
+        features = torch.from_numpy(features)
+    
+    device = features.device
+    
+    if len(features.shape) == 2:  # [seq_len, feature_dim]
+        features = features.unsqueeze(0)  # [1, seq_len, feature_dim]
+        single_sample = True
+    else:
+        single_sample = False
+    
+    batch_size, time_steps, feature_dim = features.shape
     
     warped_features = torch.zeros_like(features)
     
     for i in range(batch_size):
+        # 创建随机时间扭曲映射
+        time_warp_idx = torch.linspace(0, time_steps - 1, time_steps)
+        
+        # 添加扭曲
+        warp = torch.randn(1) * warp_factor
+        warp_idx = torch.arange(time_steps, dtype=torch.float32)
+        warp_idx = warp_idx + warp * torch.sin(warp_idx.float() * 2 * np.pi / time_steps)
+        warp_idx = torch.clamp(warp_idx, 0, time_steps - 1)
+        
+        # 对每个时间步进行插值
+        for t in range(time_steps):
+            idx = warp_idx[t].long()
+            next_idx = min(idx + 1, time_steps - 1)
+            alpha = warp_idx[t] - idx
+            
+            warped_features[i, t] = (1 - alpha) * features[i, idx] + alpha * features[i, next_idx]
+    
+    if single_sample:
+        warped_features = warped_features.squeeze(0)
+    
+    return warped_features.to(device)
+
+def add_feature_jitter(features, jitter_ratio=0.05):
+    """添加随机抖动增强
+    
+    Args:
+        features: 输入特征 [seq_len, feature_dim] 或 [batch_size, seq_len, feature_dim]
+        jitter_ratio: 抖动强度
+        
+    Returns:
+        jittered_features: 添加抖动后的特征
+    """
+    if isinstance(features, torch.Tensor):
+        device = features.device
+        features_np = features.cpu().numpy()
+        is_tensor = True
+    else:
+        features_np = features
+        is_tensor = False
+    
+    # 计算抖动值
+    noise = np.random.normal(0, jitter_ratio * np.std(features_np), features_np.shape)
+    
+    # 添加抖动
+    jittered_features = features_np + noise
+    
+    if is_tensor:
+        return torch.tensor(jittered_features, device=device)
+    else:
+        return jittered_features
+
+def add_feature_mask(features, mask_ratio=0.05, mask_value=0):
+    """应用特征掩码增强
+    
+    Args:
+        features: 输入特征 [seq_len, feature_dim] 或 [batch_size, seq_len, feature_dim]
+        mask_ratio: 掩码比例
+        mask_value: 填充值
+    
+    Returns:
+        masked_features: 掩码后的特征
+    """
+    if isinstance(features, torch.Tensor):
+        device = features.device
+        features_np = features.cpu().numpy()
+        is_tensor = True
+    else:
+        features_np = features
+        is_tensor = False
+    
+    # 复制原始特征
+    masked_features = features_np.copy()
+    
+    # 获取形状
+    if masked_features.ndim == 3:  # [batch_size, seq_len, feature_dim]
+        batch_size, seq_len, feature_dim = masked_features.shape
+        
+        # 对每个样本应用掩码
+        for i in range(batch_size):
+            # 时间维度掩码
+            time_mask_size = max(1, int(seq_len * mask_ratio))
+            time_mask_start = random.randint(0, seq_len - time_mask_size)
+            masked_features[i, time_mask_start:time_mask_start+time_mask_size, :] = mask_value
+            
+            # 特征维度掩码
+            feat_mask_size = max(1, int(feature_dim * mask_ratio))
+            feat_mask_start = random.randint(0, feature_dim - feat_mask_size)
+            masked_features[i, :, feat_mask_start:feat_mask_start+feat_mask_size] = mask_value
+            
+    else:  # [seq_len, feature_dim]
+        seq_len, feature_dim = masked_features.shape
+        
+        # 时间维度掩码
+        time_mask_size = max(1, int(seq_len * mask_ratio))
+        time_mask_start = random.randint(0, seq_len - time_mask_size)
+        masked_features[time_mask_start:time_mask_start+time_mask_size, :] = mask_value
+        
+        # 特征维度掩码
+        feat_mask_size = max(1, int(feature_dim * mask_ratio))
+        feat_mask_start = random.randint(0, feature_dim - feat_mask_size)
+        masked_features[:, feat_mask_start:feat_mask_start+feat_mask_size] = mask_value
+    
+    if is_tensor:
+        return torch.tensor(masked_features, device=device)
+    else:
+        return masked_features
+
+def spec_augment(features, freq_mask_param=5, time_mask_param=10, n_freq_masks=2, n_time_masks=2):
+    """SpecAugment风格的数据增强
+    
+    Args:
+        features: 输入特征 [batch_size, seq_len, feature_dim]
+        freq_mask_param: 频率掩码最大宽度
+        time_mask_param: 时间掩码最大宽度
+        n_freq_masks: 频率掩码数量
+        n_time_masks: 时间掩码数量
+        
+    Returns:
+        augmented_features: 增强后的特征
+    """
+    if isinstance(features, np.ndarray):
+        features = torch.from_numpy(features)
+    
+    device = features.device
+    augmented_features = features.clone()
+    
+    if len(augmented_features.shape) == 2:  # [seq_len, feature_dim]
+        augmented_features = augmented_features.unsqueeze(0)  # [1, seq_len, feature_dim]
+        single_sample = True
+    else:
+        single_sample = False
+    
+    batch_size, time_steps, feature_dim = augmented_features.shape
+    
+    # 对每个批次样本应用增强
+    for i in range(batch_size):
+        # 应用频率掩码
+        for _ in range(n_freq_masks):
+            f_mask_width = torch.randint(0, freq_mask_param, (1,)).item()
+            f_start = torch.randint(0, feature_dim - f_mask_width, (1,)).item()
+            augmented_features[i, :, f_start:f_start + f_mask_width] = 0
+        
+        # 应用时间掩码
+        for _ in range(n_time_masks):
+            t_mask_width = torch.randint(0, time_mask_param, (1,)).item()
+            t_start = torch.randint(0, time_steps - t_mask_width, (1,)).item()
+            augmented_features[i, t_start:t_start + t_mask_width, :] = 0
+    
+    if single_sample:
+        augmented_features = augmented_features.squeeze(0)
+    
         # 创建随机扭曲点
         center = random.randint(seq_len // 4, seq_len * 3 // 4)
         warp_size = random.randint(1, max_warp)
