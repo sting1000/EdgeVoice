@@ -20,6 +20,7 @@ import pandas as pd
 import shutil
 import pickle
 import traceback
+from models.streaming_conformer import StreamingConformer
 
 def set_seed(seed=42):
     """设置随机种子以确保可重现性"""
@@ -599,80 +600,155 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 加载模型
+    # 加载模型检查点
     checkpoint = torch.load(model_path, map_location=device)
     
-    # 检查是否是新的保存格式
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        print("检测到新的模型保存格式，包含标签映射和状态字典")
+    if isinstance(checkpoint, dict) and 'model_config' in checkpoint and checkpoint['model_config'].get('model_type') == 'streaming_conformer':
+        # --- 处理 StreamingConformer 模型 --- 
+        print("检测到 StreamingConformer 模型检查点...")
+        model_config = checkpoint['model_config']
         model_state = checkpoint['model_state_dict']
         intent_labels = checkpoint['intent_labels']
-        num_classes = len(intent_labels)
-        print(f"模型包含 {num_classes} 个意图类别: {intent_labels}")
+        num_classes = model_config['num_classes']
         
-        # 获取input_size (对于fast模型)
-        input_size = checkpoint.get('input_size', N_MFCC * 3)  # 使用N_MFCC * 3作为默认值，通常是48维
+        print(f"从配置加载模型参数: {model_config}")
+        print(f"意图类别: {intent_labels}")
         
-        # 检查模型状态字典中的参数形状，以确定真实的input_size
-        if 'input_projection.weight' in model_state:
-            # 从输入投影矩阵的形状推断input_size
-            _, actual_input_size = model_state['input_projection.weight'].shape
-            if actual_input_size != input_size:
-                print(f"警告: 从保存的状态字典中检测到不同的input_size: {actual_input_size}，将使用此值")
-                input_size = actual_input_size
-    else:
-        print("检测到旧的模型保存格式，仅包含状态字典")
-        model_state = checkpoint
-        num_classes = len(INTENT_CLASSES)
-        # 从模型权重中推断input_size
-        if isinstance(model_state, dict) and 'input_projection.weight' in model_state:
-            _, input_size = model_state['input_projection.weight'].shape
-            print(f"从模型权重中推断input_size: {input_size}")
+        # 使用保存的配置实例化 StreamingConformer
+        model = StreamingConformer(
+            input_dim=model_config['input_dim'],
+            hidden_dim=model_config['hidden_dim'],
+            num_classes=num_classes,
+            num_layers=model_config['num_layers'],
+            num_heads=model_config['num_heads'],
+            dropout=model_config.get('dropout', 0.1), # 兼容旧模型
+            kernel_size=model_config.get('kernel_size', 31), # 兼容旧模型
+            expansion_factor=model_config.get('expansion_factor', 4) # 兼容旧模型
+        )
+        
+        # 加载权重
+        # 修正潜在的尺寸不匹配问题 (例如 pos_encoding.pe)
+        # 在加载状态字典之前，检查并调整参数形状
+        current_state_dict = model.state_dict()
+        for name, param in model_state.items():
+            if name in current_state_dict:
+                if current_state_dict[name].shape != param.shape:
+                    print(f"警告: 参数 '{name}' 形状不匹配。检查点: {param.shape}, 当前模型: {current_state_dict[name].shape}. 尝试调整...")
+                    # 特别处理位置编码 (如果需要)
+                    if name == 'pos_encoding.pe' and len(param.shape) == 3 and len(current_state_dict[name].shape) == 3:
+                         # 假设 batch 和 dim 维度匹配，只调整长度维度
+                         if param.shape[0] == current_state_dict[name].shape[0] and param.shape[2] == current_state_dict[name].shape[2]:
+                             max_len_checkpoint = param.shape[1]
+                             max_len_current = current_state_dict[name].shape[1]
+                             # 从检查点复制尽可能多的位置编码
+                             copy_len = min(max_len_checkpoint, max_len_current)
+                             current_state_dict[name][:, :copy_len, :] = param[:, :copy_len, :]
+                             print(f"已调整 '{name}' 的形状。")
+                             model_state[name] = current_state_dict[name] # 使用调整后的参数
+                         else:
+                             print(f"无法自动调整 '{name}'，维度不匹配。跳过加载此参数。")
+                             # 从 model_state 中移除，避免加载错误
+                             model_state.pop(name)
+                    else:
+                        print(f"无法自动调整 '{name}'，跳过加载此参数。")
+                        # 从 model_state 中移除
+                        model_state.pop(name)
+            else:
+                print(f"警告: 在检查点中找到的参数 '{name}' 不在当前模型中。忽略。")
+
+        # 加载可能已修改的状态字典
+        model.load_state_dict(model_state, strict=False) # 使用 strict=False 忽略不匹配的键
+        print("模型权重加载完成 (strict=False)")
+        model.to(device)
+        model.eval()
+        
+        # 创建流式模型的示例输入 (通常是 chunk)
+        # 假设 chunk_size=20, input_dim 与模型一致
+        dummy_input_chunk = torch.randn(1, STREAMING_CHUNK_SIZE, model_config['input_dim'], device=device)
+        
+        # 注意: 导出完整的流式模型（带缓存）比较复杂
+        # 这里我们先导出非流式的前向传播部分
+        # 如果需要导出 predict_streaming，需要定义缓存输入/输出
+        input_names = ["input_chunk"]
+        output_names = ["output_logits"]
+        
+        dynamic_axes_dict = None
+        if dynamic_axes:
+            dynamic_axes_dict = {
+                'input_chunk': {0: 'batch_size', 1: 'chunk_length'},
+                'output_logits': {0: 'batch_size'}
+            }
+
+        # 导出核心模型逻辑（forward）
+        print(f"导出 StreamingConformer (forward pass) 到 {onnx_save_path}")
+        torch.onnx.export(
+            model, # 导出模型实例
+            dummy_input_chunk, # 示例输入
+            onnx_save_path,
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes_dict,
+            export_params=True,
+            opset_version=13,
+            do_constant_folding=True,
+            verbose=False
+        )
+
+    elif model_type == 'fast' or (isinstance(checkpoint, dict) and checkpoint.get('model_config', {}).get('model_type') != 'streaming_conformer'):
+        # --- 处理 FastIntentClassifier 模型 (保持原有逻辑) ---
+        print("处理 FastIntentClassifier 模型...")
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            # ... (加载新格式 Fast模型的代码不变) ...
+            model_state = checkpoint['model_state_dict']
+            intent_labels = checkpoint['intent_labels']
+            num_classes = len(intent_labels)
+            input_size = checkpoint.get('input_size', N_MFCC * 3)
+            if 'input_projection.weight' in model_state:
+                _, actual_input_size = model_state['input_projection.weight'].shape
+                if actual_input_size != input_size:
+                    input_size = actual_input_size
         else:
-            input_size = N_MFCC * 3  # 默认值
-    
-    print(f"使用input_size={input_size}创建模型")
-    
-    # 加载FastIntentClassifier模型
-    print(f"创建新的FastIntentClassifier实例，输入维度: {input_size}，类别数: {num_classes}")
-    model = FastIntentClassifier(input_size=input_size, num_classes=num_classes)
-    
-    # 加载保存的权重
-    print("加载模型权重")
-    model.load_state_dict(model_state)
-    model.to(device)
-    model.eval()
-    
-    # 创建示例输入（支持批量输入和单个输入）
-    dummy_input = torch.randn(1, 500, input_size, device=device)  # 批量大小为1，序列长度为500
-    
-    # 定义ONNX导出的输入和输出名称
-    input_names = ["input"]
-    output_names = ["output"]
-    
-    # 定义动态轴（如果需要）
-    dynamic_axes_dict = None
-    if dynamic_axes:
-        dynamic_axes_dict = {
-            'input': {0: 'batch_size', 1: 'sequence_length'},  # 动态批量大小和序列长度
-            'output': {0: 'batch_size'}
-        }
-    
-    # 导出模型
-    print(f"导出模型到 {onnx_save_path}")
-    torch.onnx.export(
-        model,
-        dummy_input,
-        onnx_save_path,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes_dict,
-        export_params=True,
-        opset_version=13,  # 使用更高版本的opset支持更多操作
-        do_constant_folding=True,
-        verbose=False
-    )
-    
+            # ... (加载旧格式 Fast模型的代码不变) ...
+            model_state = checkpoint
+            num_classes = len(INTENT_CLASSES) # 假设旧模型使用 config 中的 INTENT_CLASSES
+            if isinstance(model_state, dict) and 'input_projection.weight' in model_state:
+                 _, input_size = model_state['input_projection.weight'].shape
+            else:
+                input_size = N_MFCC * 3
+        
+        print(f"使用input_size={input_size}创建模型")
+        model = FastIntentClassifier(input_size=input_size, num_classes=num_classes)
+        model.load_state_dict(model_state)
+        model.to(device)
+        model.eval()
+        
+        dummy_input = torch.randn(1, 500, input_size, device=device) # 保持 Fast 模型的输入
+        input_names = ["input"]
+        output_names = ["output"]
+        dynamic_axes_dict = None
+        if dynamic_axes:
+            dynamic_axes_dict = {
+                'input': {0: 'batch_size', 1: 'sequence_length'},
+                'output': {0: 'batch_size'}
+            }
+            
+        print(f"导出 FastIntentClassifier 到 {onnx_save_path}")
+        torch.onnx.export(
+            model,
+            dummy_input,
+            onnx_save_path,
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes_dict,
+            export_params=True,
+            opset_version=13,
+            do_constant_folding=True,
+            verbose=False
+        )
+        
+    else:
+         raise ValueError(f"无法确定模型类型或不受支持的检查点格式: {model_path}")
+
     print(f"模型已导出至: {onnx_save_path}")
     return onnx_save_path
 

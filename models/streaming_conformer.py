@@ -171,11 +171,6 @@ class MultiHeadAttention(nn.Module):
                 v = torch.cat([cached_v, v], dim=2)
                 
             # 为下一次流式推理更新缓存
-            # 保持缓存大小有限，避免过长序列
-            if k.size(2) > 128:  # 限制缓存的最大长度
-                k = k[:, :, -128:]
-                v = v[:, :, -128:]
-                
             updated_cache = (k, v)
         else:
             updated_cache = None
@@ -295,25 +290,13 @@ class ConformerConvolution(nn.Module):
         return x
 
 class AttentivePooling(nn.Module):
-    """增强的注意力池化层，更稳定的输出表示"""
+    """注意力池化层"""
     def __init__(self, dim):
         super().__init__()
-        
-        # 注意力计算模块
         self.attention = nn.Sequential(
             nn.Linear(dim, dim),
             nn.Tanh(),
             nn.Linear(dim, 1)
-        )
-        
-        # 新增: 位置偏好嵌入，偏向最近的帧
-        self.position_bias = nn.Parameter(torch.zeros(1, 1000, 1))  # 最多1000帧
-        nn.init.normal_(self.position_bias, std=0.02)
-        
-        # 新增: 输出稳定性增强层
-        self.output_stabilizer = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Dropout(0.1)
         )
         
     def forward(self, x):
@@ -325,25 +308,12 @@ class AttentivePooling(nn.Module):
         Returns:
             weighted_x: 池化后的特征 [batch_size, dim]
         """
-        batch_size, seq_len, _ = x.shape
-        
         # 计算注意力权重
         attn_weights = self.attention(x)  # [batch_size, seq_len, 1]
-        
-        # 应用位置偏好 - 偏向最近的帧
-        position_weights = self.position_bias[:, :seq_len, :]
-        # 指数增长权重，后面的帧权重更高
-        position_factor = torch.exp(torch.linspace(0, 2, seq_len)).reshape(1, seq_len, 1).to(x.device)
-        attn_weights = attn_weights + position_weights * position_factor
-        
-        # Softmax归一化
         attn_weights = F.softmax(attn_weights, dim=1)
         
         # 应用注意力加权
         weighted_x = torch.sum(x * attn_weights, dim=1)  # [batch_size, dim]
-        
-        # 应用输出稳定器
-        weighted_x = self.output_stabilizer(weighted_x)
         
         return weighted_x
 
@@ -524,38 +494,10 @@ class StreamingConformer(nn.Module):
             conf: 预测置信度
             new_cached_states: 更新的缓存状态
         """
-        # 使用温度缩放提高置信度可靠性
-        temperature = 0.8
-        
-        # 前向传播获取logits
         logits, new_cached_states = self.forward_streaming(x, cached_states, True)
         
-        # 应用温度缩放
-        scaled_logits = logits / temperature
-        
         # 获取预测类别和置信度
-        probs = F.softmax(scaled_logits, dim=-1)
+        probs = F.softmax(logits, dim=-1)
         conf, pred = torch.max(probs, dim=-1)
-        
-        # 应用平滑处理以减少抖动
-        if cached_states is not None:
-            # 如果有之前的预测，尝试进行平滑
-            prev_logits = getattr(self, '_prev_logits', None)
-            if prev_logits is not None:
-                # 指数移动平均平滑logits
-                alpha = 0.7  # 平滑因子
-                smoothed_logits = alpha * scaled_logits + (1 - alpha) * prev_logits
-                
-                # 重新计算概率和预测
-                smooth_probs = F.softmax(smoothed_logits, dim=-1)
-                smooth_conf, smooth_pred = torch.max(smooth_probs, dim=-1)
-                
-                # 如果平滑后的预测置信度足够高，则使用它
-                if smooth_conf.item() > 0.4:  # 使用较低的阈值
-                    pred = smooth_pred
-                    conf = smooth_conf
-        
-        # 保存当前logits用于下次平滑
-        self._prev_logits = scaled_logits.detach()
         
         return pred, conf, new_cached_states 

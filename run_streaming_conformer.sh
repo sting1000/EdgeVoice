@@ -1,37 +1,36 @@
 #!/bin/bash
 
 # 清理缓存
+echo "清理特征缓存..."
 rm -rf tmp/feature_cache
 mkdir -p tmp/feature_cache
 mkdir -p saved_models
 
-# 参数设置
+# 设置参数
 ANNOTATION_FILE="data/split/train_annotations.csv"
 TEST_ANNOTATION_FILE="data/split/test_annotations.csv"
 DATA_DIR="data"
 MODEL_SAVE_PATH="saved_models/streaming_conformer.pt"
-NUM_EPOCHS=40
+NUM_EPOCHS=30
 BATCH_SIZE=16
-LEARNING_RATE=2e-5
-WEIGHT_DECAY=0.03
+LEARNING_RATE=1e-4
+WEIGHT_DECAY=0.001
 
 # 显示配置
-echo "======================================"
-echo "训练流式Conformer模型"
-echo "======================================"
-echo "训练数据: $ANNOTATION_FILE"
-echo "测试数据: $TEST_ANNOTATION_FILE"
-echo "模型保存: $MODEL_SAVE_PATH"
-echo "批量大小: $BATCH_SIZE"
-echo "学习率: $LEARNING_RATE"
+echo "=============================================="
+echo "开始训练优化后的流式Conformer模型"
 echo "训练轮数: $NUM_EPOCHS"
+echo "批大小: $BATCH_SIZE"
+echo "学习率: $LEARNING_RATE"
 echo "权重衰减: $WEIGHT_DECAY"
-echo "======================================"
+echo "特征维度: $(( 20 * 3 ))=60" # N_MFCC * 3
+echo "流式参数: CHUNK=15, STEP=5, CACHE=60"
+echo "=============================================="
 
-# 设置环境变量
-export CUDA_VISIBLE_DEVICES=0
-export OMP_NUM_THREADS=8
-export MKL_NUM_THREADS=8
+# 设置环境变量以优化性能
+export CUDA_VISIBLE_DEVICES=0  # 使用指定GPU
+export OMP_NUM_THREADS=8       # 优化OpenMP线程数
+export MKL_NUM_THREADS=8       # 优化MKL线程数
 
 # 执行训练脚本
 python train_streaming.py \
@@ -44,36 +43,52 @@ python train_streaming.py \
   --learning_rate $LEARNING_RATE \
   --weight_decay $WEIGHT_DECAY \
   --use_mixup \
-  --use_label_smoothing \
   --progressive_training \
   --evaluate \
-  --confidence_threshold 0.75
+  --confidence_threshold 0.8
 
 # 检查训练是否成功
-if [ -f "$MODEL_SAVE_PATH" ]; then
-  MODEL_SIZE=$(du -h $MODEL_SAVE_PATH | cut -f1)
-  echo "训练成功! 模型已保存到 $MODEL_SAVE_PATH (大小: $MODEL_SIZE)"
-  
-  # 导出ONNX模型和测试流式推理
-  echo "导出ONNX模型..."
-  python export_onnx.py \
-    --model_path $MODEL_SAVE_PATH \
-    --model_type streaming \
-    --onnx_save_path "saved_models/streaming_conformer.onnx" \
-    --dynamic_axes
-  
-  # 测试实时流式处理
-  TEST_AUDIO="data/test_samples/test_command.wav"
-  if [ -f "$TEST_AUDIO" ]; then
-    echo "测试实时流式处理..."
-    python real_time_streaming_demo.py \
-      --model_path $MODEL_SAVE_PATH \
-      --audio_file $TEST_AUDIO \
-      --buffer_size 0.2
-  else
-    echo "警告: 测试音频文件 $TEST_AUDIO 不存在，跳过实时测试"
-  fi
+if [ $? -eq 0 ]; then
+    echo "=============================================="
+    echo "流式Conformer模型训练和评估成功!"
+    echo "模型保存路径: $MODEL_SAVE_PATH"
+    
+    # 验证模型文件是否存在
+    if [ -f "$MODEL_SAVE_PATH" ]; then
+        echo "模型文件已成功创建"
+        echo "文件大小: $(du -h $MODEL_SAVE_PATH | cut -f1)"
+        
+        # 导出ONNX模型
+        echo "开始导出ONNX模型..."
+        python export_onnx.py \
+          --model_path $MODEL_SAVE_PATH \
+          --model_type streaming \
+          --onnx_save_path "${MODEL_SAVE_PATH%.pt}.onnx" \
+          --dynamic_axes
+          
+        # 测试实时流式处理
+        echo "=============================================="
+        echo "测试实时流式处理demo..."
+        if [ -f "data/test_samples/test_audio.wav" ]; then
+            # 如果测试音频文件存在，使用文件方式测试
+            python real_time_streaming_demo.py \
+              --model_path $MODEL_SAVE_PATH \
+              --buffer_size 1024 \
+              --chunk_size 20 \
+              --audio_file data/test_samples/test_audio.wav
+        else
+            # 如果没有测试文件
+            echo "注意: 未找到默认测试音频文件，请准备测试文件或使用麦克风模式"
+            echo "可以后续手动测试：python real_time_streaming_demo.py --model_path $MODEL_SAVE_PATH --use_mic --chunk_size 15"
+        fi
+    else
+        echo "警告: 模型文件未创建，请检查错误"
+    fi
+    
+    echo "=============================================="
+    echo "所有任务完成!"
 else
-  echo "训练失败! 模型文件 $MODEL_SAVE_PATH 不存在"
-  exit 1
+    echo "=============================================="
+    echo "训练或评估失败，请检查错误信息"
+    echo "=============================================="
 fi 
