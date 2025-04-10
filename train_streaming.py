@@ -49,14 +49,15 @@ class LabelSmoothingCrossEntropy(nn.Module):
         return torch.mean(torch.sum(-true_dist * nn.functional.log_softmax(pred, dim=1), dim=1))
 
 def prepare_data_loaders(annotation_file, data_dir=DATA_DIR, batch_size=32, 
-                          val_split=0.1, seed=42):
+                          valid_annotation_file=None, val_split=0.1, seed=42):
     """准备训练和验证数据加载器
     
     Args:
-        annotation_file: 标注文件路径
+        annotation_file: 训练数据标注文件路径
         data_dir: 数据目录
         batch_size: 批大小
-        val_split: 验证集比例
+        valid_annotation_file: 独立验证集标注文件路径，优先使用
+        val_split: 从训练集中分割验证集的比例(仅当valid_annotation_file未指定时使用)
         seed: 随机种子
     
     Returns:
@@ -64,8 +65,8 @@ def prepare_data_loaders(annotation_file, data_dir=DATA_DIR, batch_size=32,
         val_loader: 验证数据加载器 
         intent_labels: 意图标签列表
     """
-    # 加载完整数据集
-    full_dataset = StreamingAudioDataset(
+    # 加载训练数据集
+    train_dataset = StreamingAudioDataset(
         annotation_file=annotation_file,
         data_dir=data_dir,
         streaming_mode=False,  # 完整模式
@@ -74,16 +75,28 @@ def prepare_data_loaders(annotation_file, data_dir=DATA_DIR, batch_size=32,
     )
     
     # 获取意图标签
-    intent_labels = full_dataset.intent_labels
+    intent_labels = train_dataset.intent_labels
     
-    # 分割训练集和验证集
-    val_size = int(len(full_dataset) * val_split)
-    train_size = len(full_dataset) - val_size
-    
-    set_seed(seed)
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
-    
-    print(f"数据集分割 - 训练集: {train_size}, 验证集: {val_size}")
+    # 创建验证集
+    if valid_annotation_file:
+        # 使用独立验证集（不同说话者）
+        val_dataset = StreamingAudioDataset(
+            annotation_file=valid_annotation_file,
+            data_dir=data_dir,
+            streaming_mode=False,
+            use_random_crop=False,
+            use_feature_augmentation=False
+        )
+        print(f"使用独立验证集: {valid_annotation_file}")
+        print(f"训练集样本数: {len(train_dataset)}, 验证集样本数: {len(val_dataset)}")
+    else:
+        # 从训练集分割验证集
+        val_size = int(len(train_dataset) * val_split)
+        train_size = len(train_dataset) - val_size
+        
+        set_seed(seed)
+        train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
+        print(f"从训练集随机分割 - 训练集: {train_size}, 验证集: {val_size}")
     
     # 创建数据加载器
     train_loader = DataLoader(
@@ -424,7 +437,7 @@ def evaluate_streaming_model(model, test_annotation_file, data_dir,
     return accuracy
 
 def train_streaming_conformer(data_dir, annotation_file, model_save_path, 
-                            num_epochs=30, batch_size=32, seed=42,
+                            valid_annotation_file=None, num_epochs=30, batch_size=32, seed=42,
                             learning_rate=LEARNING_RATE, weight_decay=0.01,
                             use_mixup=USE_MIXUP, use_label_smoothing=USE_LABEL_SMOOTHING,
                             label_smoothing=LABEL_SMOOTHING,
@@ -433,8 +446,9 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
     
     Args:
         data_dir: 数据目录
-        annotation_file: 标注文件路径
+        annotation_file: 训练数据标注文件路径
         model_save_path: 模型保存路径
+        valid_annotation_file: 独立验证集标注文件路径
         num_epochs: 训练轮数
         batch_size: 批大小
         seed: 随机种子
@@ -457,6 +471,7 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
         annotation_file=annotation_file,
         data_dir=data_dir,
         batch_size=batch_size,
+        valid_annotation_file=valid_annotation_file,
         seed=seed
     )
     
@@ -684,6 +699,7 @@ def parse_args():
     # 数据参数
     parser.add_argument('--data_dir', type=str, default=DATA_DIR, help='数据目录')
     parser.add_argument('--annotation_file', type=str, required=True, help='训练数据标注文件')
+    parser.add_argument('--valid_annotation_file', type=str, help='验证数据标注文件（使用不同说话者）')
     parser.add_argument('--test_annotation_file', type=str, help='测试数据标注文件（用于评估）')
     
     # 模型参数
@@ -722,7 +738,11 @@ def main():
     # 配置
     print("\n=== 流式Conformer训练配置 ===")
     print(f"数据目录: {args.data_dir}")
-    print(f"标注文件: {args.annotation_file}")
+    print(f"训练标注文件: {args.annotation_file}")
+    if args.valid_annotation_file:
+        print(f"验证标注文件(独立): {args.valid_annotation_file}")
+    if args.test_annotation_file:
+        print(f"测试标注文件: {args.test_annotation_file}")
     print(f"模型保存路径: {args.model_save_path}")
     print(f"隐藏层维度: {args.hidden_dim}")
     print(f"Conformer层数: {args.num_layers}")
@@ -740,6 +760,7 @@ def main():
         data_dir=args.data_dir,
         annotation_file=args.annotation_file,
         model_save_path=args.model_save_path,
+        valid_annotation_file=args.valid_annotation_file,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         seed=args.seed,
