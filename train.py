@@ -662,32 +662,20 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
         model.to(device)
         model.eval()
         
-        # 创建流式模型的示例输入 (通常是 chunk)
-        # 假设 chunk_size=20, input_dim 与模型一致
+        # 创建流式模型的示例输入 (固定 batch_size=1, chunk_length=STREAMING_CHUNK_SIZE)
         dummy_input_chunk = torch.randn(1, STREAMING_CHUNK_SIZE, model_config['input_dim'], device=device)
         
-        # 注意: 导出完整的流式模型（带缓存）比较复杂
-        # 这里我们先导出非流式的前向传播部分
-        # 如果需要导出 predict_streaming，需要定义缓存输入/输出
         input_names = ["input_chunk"]
         output_names = ["output_logits"]
         
-        dynamic_axes_dict = None
-        if dynamic_axes:
-            dynamic_axes_dict = {
-                'input_chunk': {0: 'batch_size', 1: 'chunk_length'},
-                'output_logits': {0: 'batch_size'}
-            }
-
         # 导出核心模型逻辑（forward）
-        print(f"导出 StreamingConformer (forward pass) 到 {onnx_save_path}")
+        print(f"导出 StreamingConformer (固定形状 [1, {STREAMING_CHUNK_SIZE}, {model_config['input_dim']}]) 到 {onnx_save_path}")
         torch.onnx.export(
-            model, # 导出模型实例
-            dummy_input_chunk, # 示例输入
+            model, 
+            dummy_input_chunk, 
             onnx_save_path,
             input_names=input_names,
             output_names=output_names,
-            dynamic_axes=dynamic_axes_dict,
             export_params=True,
             opset_version=13,
             do_constant_folding=True,
