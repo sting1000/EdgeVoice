@@ -36,22 +36,23 @@ class RelativePositionalEncoding(nn.Module):
         return position_encoded
 
 class ConformerBlock(nn.Module):
-    """改进的Conformer编码器块，针对流式处理优化"""
+    """简化的Conformer编码器块，减少参数量"""
     def __init__(self, dim, dim_head=64, heads=8, ff_mult=4, 
                  conv_expansion_factor=2, conv_kernel_size=31,
                  attn_dropout=0.1, ff_dropout=0.1, conv_dropout=0.1):
         super().__init__()
         
-        self.ff1 = FeedForward(dim, mult=ff_mult, dropout=ff_dropout) 
+        # 减少FF网络的乘数以减少参数量
+        self.ff1 = FeedForward(dim, mult=ff_mult//2, dropout=ff_dropout) 
         self.attn = MultiHeadAttention(dim, heads=heads, dim_head=dim_head, dropout=attn_dropout)
         self.conv = ConformerConvolution(dim, expansion_factor=conv_expansion_factor, 
                                          kernel_size=conv_kernel_size, dropout=conv_dropout)
-        self.ff2 = FeedForward(dim, mult=ff_mult, dropout=ff_dropout)
+        self.ff2 = FeedForward(dim, mult=ff_mult//2, dropout=ff_dropout)
         self.norm = nn.LayerNorm(dim)
         
-        # 添加FF缩放投影层取代乘法广播
-        self.ff1_scale = nn.Linear(dim, dim)
-        self.ff2_scale = nn.Linear(dim, dim)
+        # 移除额外投影层，使用缩放因子替代
+        self.ff1_scale = 0.5
+        self.ff2_scale = 0.5
         
     def forward(self, x, cache=None):
         """前向传播，支持流式缓存
@@ -64,10 +65,8 @@ class ConformerBlock(nn.Module):
             x: 输出特征
             new_cache: 更新后的缓存状态（当cache不为None时）
         """
-        # 第一个前馈模块 - 使用缩放投影层代替0.5乘法
-        ff1_out = self.ff1(x)
-        ff1_scaled = self.ff1_scale(ff1_out)  # 替代0.5乘法
-        x_ff1 = x + ff1_scaled  # 完全加法，无广播
+        # 第一个前馈模块 - 使用简单缩放
+        x_ff1 = x + self.ff1(x) * self.ff1_scale
         
         # 自注意力模块
         if cache is not None:
@@ -93,9 +92,7 @@ class ConformerBlock(nn.Module):
             x_conv = x_attn + conv_out
         
         # 第二个前馈模块
-        ff2_out = self.ff2(x_conv)
-        ff2_scaled = self.ff2_scale(ff2_out)  # 替代0.5乘法
-        x_ff2 = x_conv + ff2_scaled
+        x_ff2 = x_conv + self.ff2(x_conv) * self.ff2_scale
         
         # 最后的归一化
         output = self.norm(x_ff2)
@@ -103,15 +100,17 @@ class ConformerBlock(nn.Module):
         return (output, new_cache) if cache is not None else output
 
 class FeedForward(nn.Module):
-    """增强的前馈网络，使用SwiGLU激活"""
+    """优化的前馈网络，使用更小的中间维度"""
     def __init__(self, dim, mult=4, dropout=0.1):
         super().__init__()
         
         self.norm = nn.LayerNorm(dim)
         
-        # SwiGLU激活提高表达能力
-        self.proj_in = nn.Linear(dim, dim * mult * 2)
-        self.proj_out = nn.Linear(dim * mult, dim)
+        # 使用标准激活替代SwiGLU，减少参数量
+        inner_dim = int(dim * mult)
+        self.fc1 = nn.Linear(dim, inner_dim)
+        self.act = nn.SiLU()  # SiLU比SwiGLU更轻量
+        self.fc2 = nn.Linear(inner_dim, dim)
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
@@ -124,23 +123,19 @@ class FeedForward(nn.Module):
             x: 输出特征
         """
         x_norm = self.norm(x)
-        
-        # SwiGLU激活
-        proj = self.proj_in(x_norm)
-        x1, x2 = proj.chunk(2, dim=-1)
-        # 使用显式乘法而非广播
-        x_swiGLU = F.silu(x1) * x2
-        
-        # 输出投影
-        out = self.dropout(self.proj_out(x_swiGLU))
-        
-        return out
+        x = self.fc1(x_norm)
+        x = self.act(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.dropout(x)
+        return x
 
 class MultiHeadAttention(nn.Module):
-    """优化的多头注意力模块"""
+    """优化的多头注意力模块，使用更小的内部维度"""
     def __init__(self, dim, heads=8, dim_head=64, dropout=0.1):
         super().__init__()
         
+        # 减少内部维度
         inner_dim = dim_head * heads
         self.heads = heads
         self.dim_head = dim_head
@@ -221,7 +216,7 @@ class MultiHeadAttention(nn.Module):
         return out
 
 class ConformerConvolution(nn.Module):
-    """Conformer卷积模块，针对流式处理优化"""
+    """Conformer卷积模块，使用Conv2D替代Conv1D"""
     def __init__(self, dim, expansion_factor=2, kernel_size=31, dropout=0.1):
         super().__init__()
         
@@ -231,15 +226,15 @@ class ConformerConvolution(nn.Module):
         self.norm = nn.LayerNorm(dim)
         self.pointwise_conv1 = nn.Conv1d(dim, inner_dim * 2, kernel_size=1)
         
-        # 修改为普通卷积，避免使用分组卷积以满足Atherton加速要求
-        self.conv = nn.Conv1d(
+        # 使用Conv2D替代Conv1D，添加一个维度
+        self.conv = nn.Conv2d(
             inner_dim, inner_dim, 
-            kernel_size=kernel_size, 
-            padding=padding,
-            groups=1  # 使用普通卷积而非分组卷积
+            kernel_size=(1, kernel_size),  # 变为2D卷积(H=1,W=kernel_size)
+            padding=(0, padding),         # 只在时间维度上填充
+            groups=inner_dim  # 使用分组卷积减少参数
         )
         
-        self.batch_norm = nn.BatchNorm1d(inner_dim)
+        self.batch_norm = nn.BatchNorm2d(inner_dim)  # 2D BatchNorm
         self.pointwise_conv2 = nn.Conv1d(inner_dim, dim, kernel_size=1)
         self.dropout = nn.Dropout(dropout)
         
@@ -289,10 +284,16 @@ class ConformerConvolution(nn.Module):
         else:
             updated_cache = None
         
-        # 使用标准卷积而非深度卷积
+        # 扩展到4D张量: [batch, channels, 1, seq_len]
+        x = x.unsqueeze(2)
+        
+        # 使用2D卷积
         x = self.conv(x)
         x = self.batch_norm(x)
         x = F.silu(x)  # SiLU (Swish)激活
+        
+        # 压缩回3D: [batch, channels, seq_len]
+        x = x.squeeze(2)
         
         # 第二个逐点卷积
         x = self.pointwise_conv2(x)
@@ -312,16 +313,14 @@ class ConformerConvolution(nn.Module):
         return x
 
 class AttentivePooling(nn.Module):
-    """注意力池化层，避免广播操作"""
+    """简化的注意力池化层"""
     def __init__(self, dim):
         super().__init__()
         self.attention = nn.Sequential(
-            nn.Linear(dim, dim),
+            nn.Linear(dim, dim // 2),  # 减少中间维度
             nn.Tanh(),
-            nn.Linear(dim, 1)
+            nn.Linear(dim // 2, 1)
         )
-        # 添加融合层代替广播乘法
-        self.fusion = nn.Linear(dim, dim)
         
     def forward(self, x):
         """应用注意力池化
@@ -336,31 +335,23 @@ class AttentivePooling(nn.Module):
         attn_weights = self.attention(x)  # [batch_size, seq_len, 1]
         attn_weights = F.softmax(attn_weights, dim=1)
         
-        # 使用融合方式代替显式广播乘法
-        batch_size, seq_len, dim = x.shape
-        # 将注意力权重和特征拼接送入融合层
-        weighted_sum = torch.zeros(batch_size, dim, device=x.device)
-        for i in range(seq_len):
-            # 显式循环累加，避免广播
-            weight = attn_weights[:, i, 0].unsqueeze(1)  # [batch_size, 1]
-            weight_expanded = weight.repeat(1, dim)  # [batch_size, dim]
-            weighted_sum += weight_expanded * x[:, i]
-        
-        return weighted_sum
+        # 标准加权求和，更高效
+        weighted_sum = torch.bmm(attn_weights.transpose(1, 2), x)
+        return weighted_sum.squeeze(1)
 
 class StreamingConformer(nn.Module):
-    """流式Conformer模型，针对语音命令识别优化"""
+    """优化的流式Conformer模型，减少参数量"""
     def __init__(self, input_dim=48, hidden_dim=160, num_classes=4, 
                  num_layers=6, num_heads=8, dropout=0.1, 
                  kernel_size=15, expansion_factor=4):
         super().__init__()
         
-        # 确保hidden_dim是16的倍数，满足FP16 16通道对齐
+        # 缩小hidden_dim，减少参数量
         hidden_dim = (hidden_dim // 16) * 16
         
-        # 确保dim_head是16的倍数
+        # 确保dim_head是8的倍数，减少内存对齐需求
         dim_head = (hidden_dim // num_heads)
-        dim_head = (dim_head // 16) * 16
+        dim_head = (dim_head // 8) * 8
         if dim_head < 16:
             dim_head = 16
         
@@ -379,7 +370,7 @@ class StreamingConformer(nn.Module):
                 dim_head=dim_head,
                 heads=num_heads,
                 ff_mult=expansion_factor,
-                conv_expansion_factor=2,
+                conv_expansion_factor=1,  # 减少卷积扩展因子
                 conv_kernel_size=kernel_size,
                 attn_dropout=dropout,
                 ff_dropout=dropout,
@@ -390,8 +381,9 @@ class StreamingConformer(nn.Module):
         # 特征池化层 - 使用注意力池化替代简单平均
         self.attention_pooling = AttentivePooling(hidden_dim)
         
-        # 输出层 - 使用16通道对齐的隐藏层
-        classifier_hidden = ((hidden_dim * 2) // 16) * 16
+        # 输出层 - 减少隐藏层大小
+        classifier_hidden = hidden_dim // 2
+        classifier_hidden = (classifier_hidden // 16) * 16  # 16通道对齐
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim, classifier_hidden),
             nn.LayerNorm(classifier_hidden),
