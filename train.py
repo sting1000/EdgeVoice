@@ -626,39 +626,67 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
             expansion_factor=model_config.get('expansion_factor', 4) # 兼容旧模型
         )
         
-        # 加载权重
-        # 修正潜在的尺寸不匹配问题 (例如 pos_encoding.pe)
-        # 在加载状态字典之前，检查并调整参数形状
+        # 创建新状态字典并调整参数
+        new_state_dict = {}
         current_state_dict = model.state_dict()
+        
+        # 预处理卷积权重
         for name, param in model_state.items():
-            if name in current_state_dict:
-                if current_state_dict[name].shape != param.shape:
-                    print(f"警告: 参数 '{name}' 形状不匹配。检查点: {param.shape}, 当前模型: {current_state_dict[name].shape}. 尝试调整...")
-                    # 特别处理位置编码 (如果需要)
-                    if name == 'pos_encoding.pe' and len(param.shape) == 3 and len(current_state_dict[name].shape) == 3:
-                         # 假设 batch 和 dim 维度匹配，只调整长度维度
-                         if param.shape[0] == current_state_dict[name].shape[0] and param.shape[2] == current_state_dict[name].shape[2]:
-                             max_len_checkpoint = param.shape[1]
-                             max_len_current = current_state_dict[name].shape[1]
-                             # 从检查点复制尽可能多的位置编码
-                             copy_len = min(max_len_checkpoint, max_len_current)
-                             current_state_dict[name][:, :copy_len, :] = param[:, :copy_len, :]
-                             print(f"已调整 '{name}' 的形状。")
-                             model_state[name] = current_state_dict[name] # 使用调整后的参数
-                         else:
-                             print(f"无法自动调整 '{name}'，维度不匹配。跳过加载此参数。")
-                             # 从 model_state 中移除，避免加载错误
-                             model_state.pop(name)
+            # 特殊处理1D->2D卷积权重
+            if 'pointwise_conv1.weight' in name and len(param.shape) == 3:
+                # 获取对应的模型参数
+                model_param = current_state_dict.get(name)
+                if model_param is not None and len(model_param.shape) == 4:
+                    # Conv1d -> Conv2d: [out_ch, in_ch, kernel] -> [out_ch, in_ch, 1, kernel]
+                    out_ch, in_ch, kernel = param.shape
+                    new_param = param.unsqueeze(2)  # 添加高度维度
+                    # 如果kernel=1，我们认为是点卷积，需要调整为[out_ch, in_ch, 1, 1]
+                    if kernel == 1:
+                        new_param = new_param.squeeze(-1).unsqueeze(-1)
+                    new_state_dict[name] = new_param
+                    print(f"调整参数 '{name}': {param.shape} -> {new_param.shape}")
+                else:
+                    new_state_dict[name] = param
+            elif 'pointwise_conv2.weight' in name and len(param.shape) == 3:
+                # 同样处理第二个点卷积
+                model_param = current_state_dict.get(name)
+                if model_param is not None and len(model_param.shape) == 4:
+                    out_ch, in_ch, kernel = param.shape
+                    new_param = param.unsqueeze(2)  # 添加高度维度
+                    if kernel == 1:
+                        new_param = new_param.squeeze(-1).unsqueeze(-1)
+                    new_state_dict[name] = new_param
+                    print(f"调整参数 '{name}': {param.shape} -> {new_param.shape}")
+                else:
+                    new_state_dict[name] = param
+            elif 'depthwise_conv.weight' in name:
+                # 检查是否需要重命名为conv.weight
+                conv_name = name.replace('depthwise_conv', 'conv')
+                if conv_name in current_state_dict:
+                    # 如果维度匹配，直接使用
+                    model_param = current_state_dict.get(conv_name)
+                    if model_param is not None and model_param.shape == param.shape:
+                        new_state_dict[conv_name] = param
+                        print(f"重命名参数 '{name}' -> '{conv_name}'")
                     else:
-                        print(f"无法自动调整 '{name}'，跳过加载此参数。")
-                        # 从 model_state 中移除
-                        model_state.pop(name)
+                        # 可能需要调整维度
+                        # 传统depthwise从[out_ch, 1, kernel] -> [out_ch, in_ch//groups, 1, kernel]
+                        print(f"跳过参数 '{name}'，无法自动调整为 '{conv_name}'")
+                else:
+                    new_state_dict[name] = param
             else:
-                print(f"警告: 在检查点中找到的参数 '{name}' 不在当前模型中。忽略。")
-
-        # 加载可能已修改的状态字典
-        model.load_state_dict(model_state, strict=False) # 使用 strict=False 忽略不匹配的键
-        print("模型权重加载完成 (strict=False)")
+                # 其他参数保持不变
+                new_state_dict[name] = param
+        
+        # 从新状态字典加载可能已调整的参数
+        try:
+            model.load_state_dict(new_state_dict, strict=False)
+            print("模型权重加载完成 (strict=False)")
+        except Exception as e:
+            print(f"加载模型权重时出错: {str(e)}")
+            print("尝试使用原始状态字典...")
+            model.load_state_dict(model_state, strict=False)
+            
         model.to(device)
         model.eval()
         
@@ -668,6 +696,14 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
         input_names = ["input_chunk"]
         output_names = ["output_logits"]
         
+        # 动态轴定义
+        dynamic_axes_dict = None
+        if dynamic_axes:
+            dynamic_axes_dict = {
+                'input_chunk': {0: 'batch_size', 1: 'seq_length'},
+                'output_logits': {0: 'batch_size'}
+            }
+        
         # 导出核心模型逻辑（forward）
         print(f"导出 StreamingConformer (固定形状 [1, {STREAMING_CHUNK_SIZE}, {model_config['input_dim']}]) 到 {onnx_save_path}")
         torch.onnx.export(
@@ -676,6 +712,7 @@ def export_model_to_onnx(model_path, model_type, onnx_save_path=None, dynamic_ax
             onnx_save_path,
             input_names=input_names,
             output_names=output_names,
+            dynamic_axes=dynamic_axes_dict,
             export_params=True,
             opset_version=13,
             do_constant_folding=True,

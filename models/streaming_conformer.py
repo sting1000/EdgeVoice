@@ -216,7 +216,7 @@ class MultiHeadAttention(nn.Module):
         return out
 
 class ConformerConvolution(nn.Module):
-    """Conformer卷积模块，使用Conv2D替代Conv1D"""
+    """Conformer卷积模块，所有卷积操作都使用Conv2D以满足部署需求"""
     def __init__(self, dim, expansion_factor=2, kernel_size=31, dropout=0.1):
         super().__init__()
         
@@ -224,18 +224,23 @@ class ConformerConvolution(nn.Module):
         padding = (kernel_size - 1) // 2
         
         self.norm = nn.LayerNorm(dim)
-        self.pointwise_conv1 = nn.Conv1d(dim, inner_dim * 2, kernel_size=1)
         
-        # 使用Conv2D替代Conv1D，添加一个维度
+        # 替换Conv1d为Conv2d以满足4维卷积要求
+        self.pointwise_conv1 = nn.Conv2d(dim, inner_dim * 2, kernel_size=(1, 1))
+        
+        # 深度卷积，已经是Conv2D
         self.conv = nn.Conv2d(
             inner_dim, inner_dim, 
-            kernel_size=(1, kernel_size),  # 变为2D卷积(H=1,W=kernel_size)
+            kernel_size=(1, kernel_size),  # 2D卷积(H=1,W=kernel_size)
             padding=(0, padding),         # 只在时间维度上填充
             groups=inner_dim  # 使用分组卷积减少参数
         )
         
-        self.batch_norm = nn.BatchNorm2d(inner_dim)  # 2D BatchNorm
-        self.pointwise_conv2 = nn.Conv1d(inner_dim, dim, kernel_size=1)
+        self.batch_norm = nn.BatchNorm2d(inner_dim)
+        
+        # 替换最后的Conv1d为Conv2d
+        self.pointwise_conv2 = nn.Conv2d(inner_dim, dim, kernel_size=(1, 1))
+        
         self.dropout = nn.Dropout(dropout)
         
         # 缓存卷积状态用于流式处理
@@ -258,54 +263,49 @@ class ConformerConvolution(nn.Module):
         # 归一化
         x = self.norm(x)
         
-        # 转换为卷积格式 [batch, channels, seq_len]
-        x = x.transpose(1, 2)
+        # 转换为4D卷积格式 [batch, channels, height=1, width=seq_len]
+        x = x.transpose(1, 2).unsqueeze(2)
         
-        # 第一个逐点卷积
+        # 第一个逐点卷积 (现在是Conv2d)
         x = self.pointwise_conv1(x)
-        x = F.glu(x, dim=1)  # 门控线性单元激活
+        # 对Conv2d的输出应用GLU，确保维度正确
+        x = F.glu(x, dim=1)
         
         # 处理卷积状态缓存
         if cache is not None:
             cached_x = cache
             
             if cached_x is not None:
-                # 合并缓存状态与当前输入
-                x = torch.cat([cached_x, x], dim=2)
+                # 合并缓存状态与当前输入 (缓存也是4D格式)
+                x = torch.cat([cached_x, x], dim=3)  # 在宽度维度上拼接
                 
             # 计算要保留的历史大小
             cache_size = self.kernel_size - 1
             
             # 更新卷积状态缓存
-            if x.size(2) > cache_size:
-                updated_cache = x[:, :, -cache_size:]
+            if x.size(3) > cache_size:
+                updated_cache = x[:, :, :, -cache_size:]
             else:
                 updated_cache = x
         else:
             updated_cache = None
         
-        # 扩展到4D张量: [batch, channels, 1, seq_len]
-        x = x.unsqueeze(2)
-        
-        # 使用2D卷积
+        # 使用2D卷积 (已经是4D张量)
         x = self.conv(x)
         x = self.batch_norm(x)
-        x = F.silu(x)  # SiLU (Swish)激活
+        x = F.silu(x)
         
-        # 压缩回3D: [batch, channels, seq_len]
-        x = x.squeeze(2)
-        
-        # 第二个逐点卷积
+        # 第二个逐点卷积 (现在是Conv2d)
         x = self.pointwise_conv2(x)
         x = self.dropout(x)
         
         # 转回序列格式 [batch, seq_len, dim]
-        x = x.transpose(1, 2)
+        x = x.squeeze(2).transpose(1, 2)
         
         if cache is not None:
             # 对于流式处理，只返回实际处理的新输入
             if cached_x is not None:
-                cached_len = cached_x.size(2)
+                cached_len = cached_x.size(3)  # 缓存的宽度
                 x = x[:, -seq_len:, :]
             
             return x, updated_cache
