@@ -1,33 +1,26 @@
 # 流式Conformer语音命令识别模型
 
-本项目实现了优化的流式Conformer模型，用于实时语音命令识别。针对之前流式训练loss不下降和准确率不提升的问题，我们进行了全面优化。
+本项目实现了优化的流式Conformer模型，用于实时语音命令识别。
 
 ## 主要优化点
 
 ### 1. 模型架构优化
-- **更深的Conformer模型**：从4层增加到6层，提高模型复杂度和表达能力
-- **扩大隐藏层维度**：从128增加到192，增强特征表示能力
+- **高效的Conformer模型**：使用多层Conformer结构，提高模型复杂度和表达能力
+- **合理的隐藏层维度**：根据设备能力可调整的隐藏层大小
 - **注意力池化层**：替代简单平均池化，更好地关注关键特征
-- **减小卷积核大小**：从31减少到15，更适合短语音命令特征提取
-- **改进的前馈网络**：使用SwiGLU激活函数，提高非线性表达能力
+- **卷积核大小优化**：降低卷积核大小，更适合短语音命令特征提取
+- **高效的前馈网络**：使用优化的激活函数，提高非线性表达能力
 
 ### 2. 特征提取优化
-- **增加MFCC系数**：从16增加到20，提供更丰富的频域信息
-- **增大FFT窗口**：设置为512，获取更精细的频域分辨率
-- **增加上下文帧**：从2增加到4，增强时间依赖性捕捉能力
-- **优化流式参数**：调整块大小(15)和历史缓存(60)，更适合短命令
+- **MFCC及Delta特征**：提取MFCC及其Delta特征，捕捉动态信息
+- **流式特征处理**：优化的流式特征提取和处理逻辑
+- **特征缓存机制**：支持特征缓存加速训练
 
 ### 3. 训练策略改进
-- **标签平滑**：引入标签平滑(0.1)，减轻过拟合风险
-- **AdamW优化器**：使用AdamW替代Adam，更好的权重正则化
-- **渐进式长度训练**：从短序列开始，逐步增加序列长度
-- **余弦学习率调度**：使用余弦退火学习率，提高收敛质量
-- **早停机制**：当验证集性能不再提升时停止训练
-
-### 4. 数据增强策略
-- **特征级增强**：频谱掩码、时间掩码、高斯噪声
-- **时域扭曲**：随机延长或缩短某些帧，增加时间变形不变性
-- **MixUp技术**：线性混合不同样本，提高泛化能力
+- **两阶段训练**：完整音频预训练 + 流式微调的两阶段策略
+- **动态特征抖动**：随训练进程减小的特征抖动强度
+- **学习率调度**：支持学习率预热和衰减策略
+- **梯度裁剪**：防止梯度爆炸，稳定训练过程
 
 ## 运行方法
 
@@ -43,70 +36,73 @@ pip install -r requirements.txt
 ./run_streaming_conformer.sh
 ```
 
-也可以自定义参数：
+也可以使用精简版训练脚本直接训练：
 ```bash
-python train_streaming.py \
+python train.py \
   --data_dir data \
   --annotation_file data/split/train_annotations.csv \
   --model_save_path saved_models/streaming_conformer.pt \
-  --num_epochs 30 \
-  --batch_size 32 \
-  --learning_rate 0.0002 \
-  --weight_decay 0.01 \
-  --use_mixup \
-  --progressive_training \
-  --evaluate \
-  --test_annotation_file data/split/test_annotations.csv
+  --num_epochs 20 \
+  --pre_train_epochs 10 \
+  --fine_tune_epochs 10 \
+  --augment \
+  --use_cache
 ```
 
-### 评估流式性能
+### 导出ONNX模型
+训练完成后，可以将模型导出为ONNX格式部署到边缘设备：
 ```bash
-python train_streaming.py \
-  --evaluate \
-  --model_save_path saved_models/streaming_conformer.pt \
-  --test_annotation_file data/split/test_annotations.csv \
-  --confidence_threshold 0.85
-```
-
-### 实时测试
-使用音频文件测试：
-```bash
-python real_time_streaming_demo.py \
+python export_onnx.py \
   --model_path saved_models/streaming_conformer.pt \
-  --chunk_size 15 \
-  --audio_file data/test_samples/test_audio.wav
-```
-
-使用麦克风实时测试：
-```bash
-python real_time_streaming_demo.py \
-  --model_path saved_models/streaming_conformer.pt \
-  --use_mic \
-  --chunk_size 15
+  --onnx_save_path saved_models/streaming_conformer.onnx \
+  --dynamic_axes \
+  --check_dims
 ```
 
 ## 文件结构
+- `train.py`: 精简版的StreamingConformer模型训练脚本
 - `models/streaming_conformer.py`: 流式Conformer模型实现
-- `train_streaming.py`: 流式模型训练、评估脚本
-- `utils/feature_augmentation.py`: 特征增强工具
+- `streaming_dataset.py`: 流式数据集实现
+- `export_onnx.py`: 模型导出ONNX工具
 - `run_streaming_conformer.sh`: 训练运行脚本
+- `config.py`: 模型配置参数
+
+## 代码说明
+
+1. **训练流程**
+   - 预训练阶段：使用完整音频进行传统训练
+   - 微调阶段：使用流式特征进行微调，模拟实际推理场景
+
+2. **特征处理**
+   - 支持动态特征增强
+   - 特征抖动随训练进程衰减
+   - 支持特征缓存加速训练
+
+3. **模型保存**
+   - 保存模型配置信息，方便ONNX导出
+   - 同时保存预训练和微调的历史记录
 
 ## 调参建议
 
-1. **流式参数调整**：
-   - 对于短命令，可以尝试`STREAMING_CHUNK_SIZE=10-15`
-   - 对于长命令，可以尝试`STREAMING_CHUNK_SIZE=20-30`
-   - 设置`STREAMING_STEP_SIZE=STREAMING_CHUNK_SIZE/3`更新较为平滑
-
-2. **模型大小调整**：
+1. **模型大小调整**：
    - 小型设备：`CONFORMER_LAYERS=4, CONFORMER_HIDDEN_SIZE=128`
-   - 中型设备：`CONFORMER_LAYERS=6, CONFORMER_HIDDEN_SIZE=192`(当前配置)
+   - 中型设备：`CONFORMER_LAYERS=6, CONFORMER_HIDDEN_SIZE=192`
    - 大型设备：`CONFORMER_LAYERS=8, CONFORMER_HIDDEN_SIZE=256`
 
-3. **特征提取参数**：
-   - 增大`N_MFCC`可以提高识别率，但会增加计算量
-   - 增大`CONTEXT_FRAMES`可以提高模型时间依赖性捕捉，但需要更多内存
+2. **训练参数调整**：
+   - 增大`pre_train_epochs`可提高模型基础性能
+   - 增大`fine_tune_epochs`可提高流式推理性能
+   - 使用`--augment`选项启用数据增强，提高泛化能力
 
-4. **训练策略**：
-   - 渐进式训练对短命令效果显著，可尝试不同的长度序列
-   - 对于小数据集，增加数据增强和标签平滑可有效提高泛化能力 
+3. **特征提取参数**：
+   - 调整`N_MFCC`可以改变特征维度
+   - 修改特征抖动参数可控制训练稳定性
+
+4. **导出参数**：
+   - 启用`--dynamic_axes`使ONNX模型支持动态输入大小
+   - 使用`--check_dims`检查卷积操作维度，确保部署兼容性
+
+## 注意事项
+- 确保数据目录结构正确
+- 训练前可使用`--clear_cache`清理特征缓存
+- 支持设置随机种子`--seed`保证可重复性

@@ -62,16 +62,7 @@ if [ $? -eq 0 ]; then
       --model_type streaming \
       --onnx_save_path "${MODEL_SAVE_PATH%.pt}.onnx" \
       --dynamic_axes
-    
-    # 测试实时流式处理（可选）
-    # if [ -f "data/test_samples/test_audio.wav" ]; then
-    #     echo "测试流式处理..."
-    #     python real_time_streaming_demo.py \
-    #       --model_path $MODEL_SAVE_PATH \
-    #       --buffer_size 1024 \
-    #       --chunk_size 20 \
-    #       --audio_file data/test_samples/test_audio.wav
-    # fi
+
 else
     echo "训练失败，请检查错误信息"
 fi 
