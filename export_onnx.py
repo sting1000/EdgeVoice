@@ -12,14 +12,14 @@ import onnx
 from models.streaming_conformer import StreamingConformer
 from config import STREAMING_CHUNK_SIZE
 
-def export_model_to_onnx(model_path, onnx_save_path=None, dynamic_axes=True):
+def export_model_to_onnx(model_path, onnx_save_path=None, dynamic_axes=False):
     """
     将StreamingConformer模型导出为ONNX格式
     
     Args:
         model_path: PyTorch模型路径
         onnx_save_path: ONNX模型保存路径（如果为None则根据原模型路径生成）
-        dynamic_axes: 是否使用动态轴（用于支持可变输入大小）
+        dynamic_axes: 是否使用动态轴（用于支持可变输入大小），默认为False以固定batch_size=1
     
     Returns:
         onnx_save_path: 导出的ONNX模型路径
@@ -138,7 +138,11 @@ def export_model_to_onnx(model_path, onnx_save_path=None, dynamic_axes=True):
             }
         
         # 导出核心模型逻辑（forward）
-        print(f"导出 StreamingConformer (固定形状 [1, {STREAMING_CHUNK_SIZE}, {model_config['input_dim']}]) 到 {onnx_save_path}")
+        if dynamic_axes:
+            print(f"导出 StreamingConformer (动态形状 [batch_size, seq_length, {model_config['input_dim']}]) 到 {onnx_save_path}")
+        else:
+            print(f"导出 StreamingConformer (固定形状 [1, {STREAMING_CHUNK_SIZE}, {model_config['input_dim']}] -> [1, {num_classes}]) 到 {onnx_save_path}")
+        
         torch.onnx.export(
             model, 
             dummy_input_chunk, 
@@ -204,7 +208,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, required=True, help="PyTorch模型路径")
     parser.add_argument("--model_type", type=str, default="streaming", help="模型类型(仅支持streaming)")
     parser.add_argument("--onnx_save_path", type=str, default=None, help="ONNX模型保存路径（默认使用与PyTorch模型相同的文件名，但扩展名为.onnx）")
-    parser.add_argument("--dynamic_axes", action="store_true", default=True, help="使用动态轴（支持可变输入大小）")
+    parser.add_argument("--dynamic_axes", action="store_true", default=False, help="使用动态轴（支持可变输入大小）")
     parser.add_argument("--check_dims", action="store_true", default=True, help="检查并修复ONNX模型中的卷积算子维度")
     
     return parser.parse_args()
@@ -231,7 +235,10 @@ def main():
     # 导出模型
     print(f"开始导出模型: {args.model_path}")
     print(f"ONNX保存路径: {args.onnx_save_path}")
-    print(f"使用动态轴: {args.dynamic_axes}")
+    if args.dynamic_axes:
+        print(f"使用动态轴: 是 (可变batch_size和seq_length)")
+    else:
+        print(f"使用动态轴: 否 (固定batch_size=1, seq_length={STREAMING_CHUNK_SIZE})")
     
     try:
         onnx_path = export_model_to_onnx(

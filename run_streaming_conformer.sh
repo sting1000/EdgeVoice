@@ -60,8 +60,7 @@ if [ $? -eq 0 ]; then
     python export_onnx.py \
       --model_path $MODEL_SAVE_PATH \
       --model_type streaming \
-      --onnx_save_path "${MODEL_SAVE_PATH%.pt}.onnx" \
-      --dynamic_axes
+      --onnx_save_path "${MODEL_SAVE_PATH%.pt}.onnx"
 
 else
     echo "训练失败，请检查错误信息"
