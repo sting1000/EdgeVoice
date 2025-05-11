@@ -115,22 +115,18 @@ graph TD
 | 参数 | 当前值 | 说明 |
 | --- | --- | --- |
 | `INTENT_CLASSES` | 8个类别 | 意图分类标签列表 |
-| `FAST_CONFIDENCE_THRESHOLD` | 0.9 | 快速分类器的置信度阈值 |
 | `DISTILBERT_MODEL_PATH` | "models/distilbert..." | DistilBERT模型本地路径 |
 
 **参数影响**:
 - `INTENT_CLASSES`: 定义系统能够识别的所有意图类型，直接影响模型输出层维度。
-- `FAST_CONFIDENCE_THRESHOLD`: 控制快速模型触发精确模型的阈值，影响系统精度和延迟权衡。
 - `DISTILBERT_MODEL_PATH`: 指定预训练语言模型的路径，影响精确分类器的性能。
 
 **当前值选择理由**:
 - `INTENT_CLASSES`: 基于项目需求确定的8个关键命令类别，涵盖主要使用场景。
-- `FAST_CONFIDENCE_THRESHOLD=0.9`: 设置较高阈值确保快速模型只在高置信度时直接决策，降低误识别风险。
 - `DISTILBERT_MODEL_PATH`: 使用本地路径避免每次加载都从网络下载，提高部署稳定性。
 
 **调整建议**:
 - 增加/减少`INTENT_CLASSES`需要重新训练模型。
-- 降低`FAST_CONFIDENCE_THRESHOLD`可减少延迟但可能增加误识率，提高则相反。
 
 ## Conformer模型参数
 

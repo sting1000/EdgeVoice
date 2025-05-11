@@ -23,8 +23,7 @@ CONTEXT_FRAMES = 4  # 上下文帧数，影响时序建模能力
 
 # 模型参数（核心）
 INTENT_CLASSES = ["TAKE_PHOTO_ONE", "START_RECORDING_ONE", 
-                  "STOP_RECORDING_ONE", "CAPTURE_AND_DESCRIBE_ONE"]  
-FAST_CONFIDENCE_THRESHOLD = 0.9  # 提前终止的置信度阈值
+                  "STOP_RECORDING_ONE", "CAPTURE_AND_DESCRIBE_ONE", "OTHERS"]  
 
 # Conformer模型参数（核心，影响模型能力和大小）
 CONFORMER_LAYERS = 4  # 层数，增加可提高模型容量，也增加计算量，推荐范围：2-6
