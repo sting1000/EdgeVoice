@@ -119,152 +119,8 @@ def prepare_data_loaders(annotation_file, data_dir=DATA_DIR, batch_size=32,
     
     return train_loader, val_loader, intent_labels
 
-def train_streaming_simulation(model, features, labels, optimizer, criterion, device=DEVICE):
-    """流式训练模拟：模拟流式推理过程进行训练
-    
-    Args:
-        model: 模型
-        features: 输入特征 [batch_size, seq_len, feat_dim]
-        labels: 标签
-        optimizer: 优化器
-        criterion: 损失函数
-        device: 设备
-    
-    Returns:
-        loss: 平均损失
-        acc: 准确率
-    """
-    model.train()
-    batch_size, max_seq_len, feat_dim = features.shape
-    
-    # 随机选择流式模拟长度
-    sim_lengths = STREAMING_SIMULATION_LENGTHS
-    selected_length = random.choice(sim_lengths)
-    
-    # 确保选择的长度不超过实际序列长度
-    selected_length = min(selected_length, max_seq_len)
-    
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    num_steps = 0
-    
-    # 模拟流式处理：逐步增加序列长度
-    for current_length in range(10, selected_length + 1, 5):  # 每次增加5帧
-        if current_length > max_seq_len:
-            break
-            
-        # 截取到当前长度的特征
-        current_features = features[:, :current_length, :]
-        
-        # 重置模型流式状态
-        model.reset_streaming_state()
-        cached_states = None
-        
-        # 流式前向传播
-        try:
-            logits, cached_states = model.forward_streaming(current_features, cached_states, True)
-        except Exception as e:
-            # 如果流式前向传播失败，回退到标准前向传播
-            print(f"流式前向传播失败，回退到标准模式: {e}")
-            logits = model(current_features)
-        
-        # 计算损失
-        loss = criterion(logits, labels)
-        total_loss += loss.item()
-        
-        # 计算准确率
-        _, predicted = torch.max(logits, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-        num_steps += 1
-    
-    # 计算平均损失和准确率
-    avg_loss = total_loss / num_steps if num_steps > 0 else 0.0
-    avg_acc = 100 * correct / total if total > 0 else 0.0
-    
-    return avg_loss, avg_acc
-
-def train_mixed_batch(model, features, labels, optimizer, criterion, device=DEVICE, 
-                     use_streaming_simulation=True, streaming_ratio=MIXED_TRAINING_RATIO):
-    """混合训练：结合完整训练和流式模拟训练
-    
-    Args:
-        model: 模型
-        features: 输入特征
-        labels: 标签
-        optimizer: 优化器
-        criterion: 损失函数
-        device: 设备
-        use_streaming_simulation: 是否使用流式模拟
-        streaming_ratio: 流式训练的比例
-    
-    Returns:
-        total_loss: 总损失
-        total_acc: 总准确率
-    """
-    # 清零梯度
-    optimizer.zero_grad()
-    
-    total_loss = 0.0
-    total_correct = 0
-    total_samples = 0
-    
-    # 决定是否使用流式模拟
-    if use_streaming_simulation and random.random() < streaming_ratio:
-        # 流式模拟训练
-        stream_loss, stream_acc = train_streaming_simulation(
-            model, features, labels, optimizer, criterion, device
-        )
-        
-        # 流式模拟的损失需要反向传播
-        # 重新计算一次用于反向传播
-        model.reset_streaming_state()
-        cached_states = None
-        
-        # 选择一个随机长度进行反向传播
-        max_seq_len = features.size(1)
-        selected_length = min(random.choice(STREAMING_SIMULATION_LENGTHS), max_seq_len)
-        stream_features = features[:, :selected_length, :]
-        
-        try:
-            logits, _ = model.forward_streaming(stream_features, cached_states, True)
-        except:
-            logits = model(stream_features)
-        
-        loss = criterion(logits, labels)
-        loss.backward()
-        
-        total_loss = stream_loss
-        total_correct = int(stream_acc * labels.size(0) / 100)
-        total_samples = labels.size(0)
-        
-    else:
-        # 标准完整训练
-        logits = model(features)
-        loss = criterion(logits, labels)
-        loss.backward()
-        
-        # 计算准确率
-        _, predicted = torch.max(logits, 1)
-        total_correct = (predicted == labels).sum().item()
-        total_samples = labels.size(0)
-        total_loss = loss.item()
-    
-    # 梯度裁剪
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-    
-    # 更新参数
-    optimizer.step()
-    
-    # 计算总准确率
-    total_acc = 100 * total_correct / total_samples if total_samples > 0 else 0.0
-    
-    return total_loss, total_acc
-
 def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE, 
-                seq_length=None, use_mixup=USE_MIXUP, mixup_alpha=MIXUP_ALPHA,
-                use_mixed_training=USE_MIXED_TRAINING, current_epoch=0):
+                seq_length=None, use_mixup=USE_MIXUP, mixup_alpha=MIXUP_ALPHA):
     """训练一个epoch
     
     Args:
@@ -276,8 +132,6 @@ def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE,
         seq_length: 序列长度截断（用于渐进式训练）
         use_mixup: 是否使用MixUp
         mixup_alpha: MixUp参数
-        use_mixed_training: 是否使用混合训练
-        current_epoch: 当前训练轮数
     
     Returns:
         epoch_loss: 平均损失
@@ -288,13 +142,8 @@ def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE,
     correct = 0
     total = 0
     
-    # 判断是否启用混合训练
-    enable_mixed_training = (use_mixed_training and 
-                           current_epoch >= MIXED_TRAINING_START_EPOCH)
-    
     # 使用tqdm进度条
-    desc = "混合训练中" if enable_mixed_training else "训练中"
-    progress_bar = tqdm(dataloader, desc=desc)
+    progress_bar = tqdm(dataloader, desc="训练中")
     
     for batch in progress_bar:
         # 处理batch数据，现在batch是(features, labels)形式
@@ -322,104 +171,42 @@ def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE,
         if apply_mixup:
             features, labels_a, labels_b, lam = mixup_features(features, labels, alpha=mixup_alpha)
         
-        # 选择训练模式：混合训练 vs 标准训练
-        if enable_mixed_training:
-            # 使用混合训练策略
-            if apply_mixup:
-                # MixUp情况下的混合训练处理
-                optimizer.zero_grad()
-                
-                # 决定使用流式模拟还是标准训练
-                if random.random() < MIXED_TRAINING_RATIO:
-                    # 流式模拟训练（对MixUp后的数据）
-                    stream_loss_a, stream_acc_a = train_streaming_simulation(
-                        model, features, labels_a, optimizer, criterion, device
-                    )
-                    stream_loss_b, stream_acc_b = train_streaming_simulation(
-                        model, features, labels_b, optimizer, criterion, device
-                    )
-                    
-                    # 重新计算用于反向传播
-                    model.reset_streaming_state()
-                    max_seq_len = features.size(1)
-                    selected_length = min(random.choice(STREAMING_SIMULATION_LENGTHS), max_seq_len)
-                    stream_features = features[:, :selected_length, :]
-                    
-                    try:
-                        logits, _ = model.forward_streaming(stream_features, None, True)
-                    except:
-                        logits = model(stream_features)
-                    
-                    loss = lam * criterion(logits, labels_a) + (1 - lam) * criterion(logits, labels_b)
-                    loss.backward()
-                    
-                    batch_loss = lam * stream_loss_a + (1 - lam) * stream_loss_b
-                    batch_acc = lam * stream_acc_a + (1 - lam) * stream_acc_b
-                    
-                else:
-                    # 标准训练
-                    logits = model(features)
-                    loss = lam * criterion(logits, labels_a) + (1 - lam) * criterion(logits, labels_b)
-                    loss.backward()
-                    
-                    batch_loss = loss.item()
-                    _, predicted = torch.max(logits, 1)
-                    batch_acc = (lam * (predicted == labels_a).sum().item() + 
-                                (1 - lam) * (predicted == labels_b).sum().item()) / labels.size(0) * 100
-                
-                # 梯度裁剪和参数更新
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-                optimizer.step()
-                
-            else:
-                # 非MixUp情况下的混合训练
-                batch_loss, batch_acc = train_mixed_batch(
-                    model, features, labels, optimizer, criterion, device,
-                    use_streaming_simulation=True, streaming_ratio=MIXED_TRAINING_RATIO
-                )
-        else:
-            # 标准训练模式（保持原有逻辑）
-            optimizer.zero_grad()
-            
-            # 前向传播
-            outputs = model(features)
-            
-            # 计算损失
-            if apply_mixup:
-                # MixUp损失
-                loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
-            else:
-                loss = criterion(outputs, labels)
-            
-            # 反向传播和优化
-            loss.backward()
-            
-            # 梯度裁剪，防止梯度爆炸
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            
-            optimizer.step()
-            
-            # 计算准确率
-            batch_loss = loss.item()
-            _, predicted = torch.max(outputs, 1)
-            
-            if apply_mixup:
-                # MixUp下使用最高概率的标签计算准确率
-                batch_acc = (lam * (predicted == labels_a).sum().item() + 
-                           (1 - lam) * (predicted == labels_b).sum().item()) / labels.size(0) * 100
-            else:
-                batch_acc = (predicted == labels).sum().item() / labels.size(0) * 100
+        # 清零梯度
+        optimizer.zero_grad()
         
-        # 累计统计
-        running_loss += batch_loss
-        correct += batch_acc * labels.size(0) / 100
+        # 前向传播
+        outputs = model(features)
+        
+        # 计算损失
+        if apply_mixup:
+            # MixUp损失
+            loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
+        else:
+            loss = criterion(outputs, labels)
+        
+        # 反向传播和优化
+        loss.backward()
+        
+        # 梯度裁剪，防止梯度爆炸
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        
+        optimizer.step()
+        
+        # 计算准确率
+        running_loss += loss.item()
+        _, predicted = torch.max(outputs, 1)
         total += labels.size(0)
+        
+        if apply_mixup:
+            # MixUp下使用最高概率的标签计算准确率
+            correct += (predicted == labels_a).sum().item() * lam + (predicted == labels_b).sum().item() * (1 - lam)
+        else:
+            correct += (predicted == labels).sum().item()
         
         # 更新进度条
         progress_bar.set_postfix({
             'loss': running_loss / (progress_bar.n + 1),
-            'acc': 100 * correct / total,
-            'mode': 'mixed' if enable_mixed_training else 'standard'
+            'acc': 100 * correct / total
         })
     
     # 计算平均损失和准确率
@@ -793,9 +580,7 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
             criterion=criterion,
             device=DEVICE,
             seq_length=current_seq_length,
-            use_mixup=use_mixup,
-            use_mixed_training=USE_MIXED_TRAINING,
-            current_epoch=epoch
+            use_mixup=use_mixup
         )
         
         # 验证
@@ -939,11 +724,6 @@ def parse_args():
     parser.add_argument('--progressive_training', action='store_true', default=PROGRESSIVE_TRAINING, help='是否使用渐进式训练')
     parser.add_argument('--eval_interval', type=int, default=1, help='每多少个epoch评估一次')
     
-    # 混合训练策略参数（新增）
-    parser.add_argument('--use_mixed_training', action='store_true', default=USE_MIXED_TRAINING, help='是否启用混合训练策略')
-    parser.add_argument('--mixed_training_ratio', type=float, default=MIXED_TRAINING_RATIO, help='流式训练的比例')
-    parser.add_argument('--mixed_training_start_epoch', type=int, default=MIXED_TRAINING_START_EPOCH, help='开始混合训练的epoch')
-    
     # 评估参数
     parser.add_argument('--evaluate', action='store_true', help='是否评估模型')
     parser.add_argument('--confidence_threshold', type=float, default=0.85, help='流式评估的置信度阈值')
@@ -974,10 +754,6 @@ def main():
     print(f"使用MixUp: {args.use_mixup}")
     print(f"标签平滑: {args.label_smoothing}")
     print(f"渐进式训练: {args.progressive_training}")
-    print(f"混合训练策略: {args.use_mixed_training}")
-    if args.use_mixed_training:
-        print(f"流式训练比例: {args.mixed_training_ratio}")
-        print(f"混合训练开始轮次: {args.mixed_training_start_epoch}")
     
     # 训练模型
     model, intent_labels = train_streaming_conformer(

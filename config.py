@@ -46,9 +46,21 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 # 流式处理参数（核心，影响实时推理）
-STREAMING_CHUNK_SIZE = 100  # 每次处理的帧数，减小可降低延迟但可能降低准确率，推荐范围：10-30
-MAX_CACHED_FRAMES = 100  # 历史缓存帧数，增加可保留更多上下文，推荐范围：40-100
-STREAMING_STEP_SIZE = 50  # 步长，影响特征重叠率，推荐范围：5-20
+# 基于语音数据特点优化：主要分布在5s以下，绝大部分2s以下
+# 2秒 = 200帧，5秒 = 500帧
+
+# 自适应chunk size策略
+STREAMING_CHUNK_SIZE = 200  # 增加到200帧(2秒)，覆盖大部分完整命令
+STREAMING_CHUNK_SIZE_SMALL = 100  # 备选小chunk size(1秒)，用于低延迟场景
+STREAMING_CHUNK_SIZE_LARGE = 300  # 备选大chunk size(3秒)，用于复杂命令
+
+MAX_CACHED_FRAMES = 150  # 增加缓存帧数，保留1.5秒历史信息
+STREAMING_STEP_SIZE = 100  # 增加步长，减少重叠计算，提高效率
+
+# 自适应策略参数
+ADAPTIVE_CHUNK_SIZE = True  # 是否启用自适应chunk size
+CONFIDENCE_THRESHOLD_EARLY = 0.9  # 高置信度提前决策阈值
+CONFIDENCE_THRESHOLD_EXTEND = 0.7  # 低置信度延长处理阈值
 
 # 数据增强参数
 AUGMENT_PROB = 0.8  # 总体数据增强概率，建议范围：0.5-0.9
@@ -63,9 +75,3 @@ USE_COSINE_SCHEDULER = True  # 是否使用余弦学习率调度
 USE_EARLY_STOPPING = True  # 是否使用早停
 EARLY_STOPPING_PATIENCE = 8  # 早停耐心值，推荐范围：5-10
 PROGRESSIVE_TRAINING = True  # 是否使用渐进式长度训练
-
-# 混合训练策略参数（新增）
-USE_MIXED_TRAINING = True  # 是否启用混合训练策略
-MIXED_TRAINING_RATIO = 0.3  # 流式训练的比例，推荐范围：0.2-0.4
-STREAMING_SIMULATION_LENGTHS = [10, 20, 30, 50, 80]  # 流式模拟的序列长度列表
-MIXED_TRAINING_START_EPOCH = 5  # 从第几个epoch开始混合训练，让模型先学习基础特征

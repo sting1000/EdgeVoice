@@ -539,3 +539,99 @@ class StreamingConformer(nn.Module):
         conf, pred = torch.max(probs, dim=-1)
         
         return pred, conf, new_cached_states 
+
+    def predict_streaming_adaptive(self, x, cached_states=None, chunk_size=None):
+        """自适应流式预测，根据置信度动态调整策略
+        
+        Args:
+            x: 输入特征 [batch_size, seq_len, input_dim]
+            cached_states: 可选的缓存状态
+            chunk_size: 可选的chunk大小，None时使用默认值
+            
+        Returns:
+            pred: 预测类别索引
+            conf: 预测置信度
+            new_cached_states: 更新的缓存状态
+            decision_info: 决策信息字典
+        """
+        # 使用指定的chunk_size或默认值
+        if chunk_size is None:
+            chunk_size = STREAMING_CHUNK_SIZE
+            
+        # 标准流式预测
+        pred, conf, new_cached_states = self.predict_streaming(x, cached_states)
+        
+        # 决策信息
+        decision_info = {
+            'chunk_size_used': chunk_size,
+            'confidence': conf.item() if hasattr(conf, 'item') else conf,
+            'early_decision': False,
+            'extend_processing': False
+        }
+        
+        # 自适应策略
+        if ADAPTIVE_CHUNK_SIZE:
+            conf_value = conf.item() if hasattr(conf, 'item') else conf
+            
+            # 高置信度：可以提前决策
+            if conf_value > CONFIDENCE_THRESHOLD_EARLY:
+                decision_info['early_decision'] = True
+                
+            # 低置信度：建议延长处理
+            elif conf_value < CONFIDENCE_THRESHOLD_EXTEND:
+                decision_info['extend_processing'] = True
+                
+        return pred, conf, new_cached_states, decision_info
+    
+    def predict_streaming_multi_scale(self, x, cached_states=None):
+        """多尺度流式预测，使用不同chunk size进行预测并融合结果
+        
+        Args:
+            x: 输入特征 [batch_size, seq_len, input_dim]
+            cached_states: 可选的缓存状态
+            
+        Returns:
+            pred: 融合后的预测类别索引
+            conf: 融合后的预测置信度
+            new_cached_states: 更新的缓存状态
+            scale_results: 各尺度的预测结果
+        """
+        scale_results = {}
+        all_logits = []
+        
+        # 不同尺度的chunk size
+        chunk_sizes = [STREAMING_CHUNK_SIZE_SMALL, STREAMING_CHUNK_SIZE, STREAMING_CHUNK_SIZE_LARGE]
+        
+        for i, chunk_size in enumerate(chunk_sizes):
+            # 调整输入长度以匹配chunk_size
+            seq_len = x.size(1)
+            if seq_len > chunk_size:
+                # 取最后chunk_size帧
+                x_scaled = x[:, -chunk_size:, :]
+            else:
+                # 填充到chunk_size
+                padding = chunk_size - seq_len
+                x_scaled = F.pad(x, (0, 0, 0, padding), mode='constant', value=0)
+            
+            # 预测
+            pred, conf, states = self.predict_streaming(x_scaled, cached_states)
+            
+            # 获取logits用于融合
+            logits, _ = self.forward_streaming(x_scaled, cached_states, False)
+            all_logits.append(logits)
+            
+            scale_results[f'scale_{chunk_size}'] = {
+                'pred': pred,
+                'conf': conf,
+                'chunk_size': chunk_size
+            }
+        
+        # 融合多尺度结果（简单平均）
+        fused_logits = torch.mean(torch.stack(all_logits), dim=0)
+        fused_probs = F.softmax(fused_logits, dim=-1)
+        fused_conf, fused_pred = torch.max(fused_probs, dim=-1)
+        
+        # 使用主要尺度的缓存状态
+        _, _, new_cached_states = self.predict_streaming(x, cached_states)
+        
+        return fused_pred, fused_conf, new_cached_states, scale_results 
