@@ -63,3 +63,9 @@ USE_COSINE_SCHEDULER = True  # 是否使用余弦学习率调度
 USE_EARLY_STOPPING = True  # 是否使用早停
 EARLY_STOPPING_PATIENCE = 8  # 早停耐心值，推荐范围：5-10
 PROGRESSIVE_TRAINING = True  # 是否使用渐进式长度训练
+
+# 混合训练策略参数（新增）
+USE_MIXED_TRAINING = True  # 是否启用混合训练策略
+MIXED_TRAINING_RATIO = 0.3  # 流式训练的比例，推荐范围：0.2-0.4
+STREAMING_SIMULATION_LENGTHS = [10, 20, 30, 50, 80]  # 流式模拟的序列长度列表
+MIXED_TRAINING_START_EPOCH = 5  # 从第几个epoch开始混合训练，让模型先学习基础特征

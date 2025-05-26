@@ -35,6 +35,7 @@ export MKL_NUM_THREADS=8       # 优化MKL线程数
 # 各参数说明：
 # --use_mixup：启用MixUp增强，提高泛化能力
 # --progressive_training：启用渐进式训练，从短序列开始训练
+# --use_mixed_training：启用混合训练策略，结合完整训练和流式模拟
 # --evaluate：训练完成后评估模型
 python train_streaming.py \
   --data_dir $DATA_DIR \
@@ -48,6 +49,7 @@ python train_streaming.py \
   --weight_decay $WEIGHT_DECAY \
   --use_mixup \
   --progressive_training \
+  --use_mixed_training \
   --evaluate \
   --confidence_threshold $CONFIDENCE_THRESHOLD
 
