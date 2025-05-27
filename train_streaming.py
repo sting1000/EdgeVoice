@@ -20,6 +20,11 @@ from config import *
 from models.streaming_conformer import StreamingConformer
 from streaming_dataset import StreamingAudioDataset, prepare_streaming_dataloader, collate_full_batch
 from utils.feature_augmentation import mixup_features, apply_augmentations
+from utils.progressive_streaming_trainer import (
+    ProgressiveStreamingTrainer, 
+    FinalPredictionLoss, 
+    EdgeVoiceMetrics
+)
 
 def set_seed(seed=42):
     """设置随机种子以确保可重现性"""
@@ -120,7 +125,8 @@ def prepare_data_loaders(annotation_file, data_dir=DATA_DIR, batch_size=32,
     return train_loader, val_loader, intent_labels
 
 def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE, 
-                seq_length=None, use_mixup=USE_MIXUP, mixup_alpha=MIXUP_ALPHA):
+                seq_length=None, use_mixup=USE_MIXUP, mixup_alpha=MIXUP_ALPHA,
+                epoch=1, streaming_trainer=None, streaming_criterion=None):
     """训练一个epoch
     
     Args:
@@ -132,20 +138,30 @@ def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE,
         seq_length: 序列长度截断（用于渐进式训练）
         use_mixup: 是否使用MixUp
         mixup_alpha: MixUp参数
+        epoch: 当前epoch（用于渐进式流式训练）
+        streaming_trainer: 渐进式流式训练器
+        streaming_criterion: 流式训练损失函数
     
     Returns:
         epoch_loss: 平均损失
         epoch_acc: 准确率
+        streaming_stats: 流式训练统计信息
     """
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
     
-    # 使用tqdm进度条
-    progress_bar = tqdm(dataloader, desc="训练中")
+    # 流式训练统计
+    streaming_batches = 0
+    regular_batches = 0
+    streaming_loss_sum = 0.0
+    regular_loss_sum = 0.0
     
-    for batch in progress_bar:
+    # 使用tqdm进度条
+    progress_bar = tqdm(dataloader, desc=f"训练中 (Epoch {epoch})")
+    
+    for batch_idx, batch in enumerate(progress_bar):
         # 处理batch数据，现在batch是(features, labels)形式
         features, labels = batch
         features = features.to(device)
@@ -161,28 +177,73 @@ def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE,
         # 应用特征增强
         features = apply_augmentations(features, phase='train')
         
-        # 初始化MixUp变量
-        apply_mixup = use_mixup and random.random() < 0.5
-        labels_a = labels
-        labels_b = None
-        lam = 1.0
-        
-        # MixUp数据增强
-        if apply_mixup:
-            features, labels_a, labels_b, lam = mixup_features(features, labels, alpha=mixup_alpha)
+        # 决定是否使用流式训练
+        use_streaming = (streaming_trainer is not None and 
+                        PROGRESSIVE_STREAMING_TRAINING and
+                        streaming_trainer.should_use_streaming(epoch, batch_idx))
         
         # 清零梯度
         optimizer.zero_grad()
         
-        # 前向传播
-        outputs = model(features)
-        
-        # 计算损失
-        if apply_mixup:
-            # MixUp损失
-            loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
+        if use_streaming:
+            # 流式训练模式
+            streaming_batches += 1
+            
+            # 执行流式前向传播
+            final_output, all_outputs = streaming_trainer.streaming_forward_pass(
+                model, features, device
+            )
+            
+            # 应用MixUp（如果启用）
+            if use_mixup and random.random() < 0.5:
+                # 对最终输出应用MixUp
+                mixed_features, labels_a, labels_b, lam = mixup_features(features, labels, alpha=mixup_alpha)
+                # 重新进行流式前向传播
+                final_output, all_outputs = streaming_trainer.streaming_forward_pass(
+                    model, mixed_features, device
+                )
+                
+                # 计算MixUp损失
+                if streaming_criterion:
+                    loss = (lam * streaming_criterion(final_output, labels_a, all_outputs) + 
+                           (1 - lam) * streaming_criterion(final_output, labels_b, all_outputs))
+                else:
+                    loss = lam * criterion(final_output, labels_a) + (1 - lam) * criterion(final_output, labels_b)
+            else:
+                # 计算流式损失
+                if streaming_criterion:
+                    loss = streaming_criterion(final_output, labels, all_outputs)
+                else:
+                    loss = criterion(final_output, labels)
+            
+            streaming_loss_sum += loss.item()
+            outputs = final_output
+            
         else:
-            loss = criterion(outputs, labels)
+            # 常规训练模式
+            regular_batches += 1
+            
+            # 初始化MixUp变量
+            apply_mixup = use_mixup and random.random() < 0.5
+            labels_a = labels
+            labels_b = None
+            lam = 1.0
+            
+            # MixUp数据增强
+            if apply_mixup:
+                features, labels_a, labels_b, lam = mixup_features(features, labels, alpha=mixup_alpha)
+            
+            # 前向传播
+            outputs = model(features)
+            
+            # 计算损失
+            if apply_mixup:
+                # MixUp损失
+                loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
+            else:
+                loss = criterion(outputs, labels)
+            
+            regular_loss_sum += loss.item()
         
         # 反向传播和优化
         loss.backward()
@@ -197,23 +258,41 @@ def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE,
         _, predicted = torch.max(outputs, 1)
         total += labels.size(0)
         
-        if apply_mixup:
-            # MixUp下使用最高概率的标签计算准确率
-            correct += (predicted == labels_a).sum().item() * lam + (predicted == labels_b).sum().item() * (1 - lam)
-        else:
+        if use_streaming:
+            # 流式训练的准确率计算
             correct += (predicted == labels).sum().item()
+        else:
+            # 常规训练的准确率计算
+            if apply_mixup:
+                # MixUp下使用最高概率的标签计算准确率
+                correct += (predicted == labels_a).sum().item() * lam + (predicted == labels_b).sum().item() * (1 - lam)
+            else:
+                correct += (predicted == labels).sum().item()
         
         # 更新进度条
+        streaming_ratio = streaming_trainer.get_streaming_ratio(epoch) if streaming_trainer else 0.0
         progress_bar.set_postfix({
             'loss': running_loss / (progress_bar.n + 1),
-            'acc': 100 * correct / total
+            'acc': 100 * correct / total,
+            'streaming_ratio': f"{streaming_ratio:.1%}",
+            'stream_batches': streaming_batches,
+            'regular_batches': regular_batches
         })
     
     # 计算平均损失和准确率
     epoch_loss = running_loss / len(dataloader)
     epoch_acc = 100 * correct / total
     
-    return epoch_loss, epoch_acc
+    # 流式训练统计信息
+    streaming_stats = {
+        'streaming_batches': streaming_batches,
+        'regular_batches': regular_batches,
+        'streaming_loss': streaming_loss_sum / streaming_batches if streaming_batches > 0 else 0.0,
+        'regular_loss': regular_loss_sum / regular_batches if regular_batches > 0 else 0.0,
+        'streaming_ratio': streaming_trainer.get_streaming_ratio(epoch) if streaming_trainer else 0.0
+    }
+    
+    return epoch_loss, epoch_acc, streaming_stats
 
 def validate(model, dataloader, criterion, device=DEVICE, seq_length=None):
     """验证模型
@@ -441,7 +520,8 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
                             learning_rate=LEARNING_RATE, weight_decay=0.01,
                             use_mixup=USE_MIXUP, use_label_smoothing=USE_LABEL_SMOOTHING,
                             label_smoothing=LABEL_SMOOTHING,
-                            progressive_training=PROGRESSIVE_TRAINING):
+                            progressive_training=PROGRESSIVE_TRAINING,
+                            progressive_streaming=PROGRESSIVE_STREAMING_TRAINING):
     """训练流式Conformer模型
     
     Args:
@@ -458,6 +538,7 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
         use_label_smoothing: 是否使用标签平滑
         label_smoothing: 标签平滑参数
         progressive_training: 是否使用渐进式训练
+        progressive_streaming: 是否使用渐进式流式训练
     
     Returns:
         model: 训练好的模型
@@ -499,11 +580,33 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
     
     # 选择损失函数
     if use_label_smoothing:
-        criterion = LabelSmoothingCrossEntropy(smoothing=label_smoothing)
+        base_criterion = LabelSmoothingCrossEntropy(smoothing=label_smoothing)
         print(f"使用标签平滑损失，平滑参数: {label_smoothing}")
     else:
-        criterion = nn.CrossEntropyLoss()
+        base_criterion = nn.CrossEntropyLoss()
         print("使用标准交叉熵损失")
+    
+    # 初始化渐进式流式训练器
+    streaming_trainer = None
+    streaming_criterion = None
+    
+    if progressive_streaming:
+        streaming_trainer = ProgressiveStreamingTrainer(
+            chunk_size=STREAMING_CHUNK_SIZE,
+            step_size=STREAMING_STEP_SIZE,
+            schedule=STREAMING_TRAINING_SCHEDULE
+        )
+        streaming_criterion = FinalPredictionLoss(
+            base_criterion=base_criterion,
+            stability_weight=STABILITY_LOSS_WEIGHT
+        )
+        print("启用渐进式流式训练")
+        print(f"流式训练调度: {STREAMING_TRAINING_SCHEDULE}")
+        print(f"Chunk大小: {STREAMING_CHUNK_SIZE}, 步长: {STREAMING_STEP_SIZE}")
+    else:
+        print("未启用渐进式流式训练")
+    
+    criterion = base_criterion
     
     # 优化器
     optimizer = optim.AdamW(
@@ -544,8 +647,12 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
         'train_loss': [],
         'train_acc': [],
         'val_loss': [],
-        'val_acc': []
+        'val_acc': [],
+        'streaming_stats': []  # 添加流式训练统计
     }
+    
+    # EdgeVoice评估指标
+    edgevoice_metrics = EdgeVoiceMetrics(core_commands=CORE_COMMANDS)
     
     # 早停设置
     best_val_acc = 0
@@ -568,19 +675,26 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
         else:
             current_seq_length = None
         
+        # 获取当前流式训练比例
+        streaming_ratio = streaming_trainer.get_streaming_ratio(epoch + 1) if streaming_trainer else 0.0
+        
         print(f"\nEpoch {epoch+1}/{num_epochs}")
         print(f"当前序列长度: {'完整序列' if current_seq_length is None else current_seq_length}")
         print(f"当前学习率: {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"流式训练比例: {streaming_ratio:.1%}")
         
         # 训练一个epoch
-        train_loss, train_acc = train_epoch(
+        train_loss, train_acc, streaming_stats = train_epoch(
             model=model,
             dataloader=train_loader,
             optimizer=optimizer,
             criterion=criterion,
             device=DEVICE,
             seq_length=current_seq_length,
-            use_mixup=use_mixup
+            use_mixup=use_mixup,
+            epoch=epoch + 1,
+            streaming_trainer=streaming_trainer,
+            streaming_criterion=streaming_criterion
         )
         
         # 验证
@@ -601,10 +715,26 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
         history['train_acc'].append(train_acc)
         history['val_loss'].append(val_loss)
         history['val_acc'].append(val_acc)
+        history['streaming_stats'].append(streaming_stats)
         
         # 打印进度
         print(f"训练损失: {train_loss:.4f}, 训练准确率: {train_acc:.2f}%")
         print(f"验证损失: {val_loss:.4f}, 验证准确率: {val_acc:.2f}%")
+        
+        # 打印流式训练统计
+        if streaming_stats['streaming_batches'] > 0:
+            print(f"流式训练批次: {streaming_stats['streaming_batches']}, "
+                  f"常规训练批次: {streaming_stats['regular_batches']}")
+            print(f"流式训练损失: {streaming_stats['streaming_loss']:.4f}, "
+                  f"常规训练损失: {streaming_stats['regular_loss']:.4f}")
+        
+        # EdgeVoice特定评估
+        if EDGEVOICE_VALIDATION and len(val_preds) > 0:
+            accuracy_metrics = edgevoice_metrics.calculate_top1_accuracy(
+                val_preds, val_labels, intent_labels
+            )
+            print(f"核心指令准确率: {accuracy_metrics['core_accuracy']:.2%} "
+                  f"({accuracy_metrics['core_samples']} 样本)")
         
         # 检查是否是最佳模型
         if val_acc > best_val_acc:
@@ -631,7 +761,13 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
                     'kernel_size': kernel_size,
                     'expansion_factor': expansion_factor,
                     'model_type': 'streaming_conformer' # 添加模型类型标识
-                }
+                },
+                'streaming_config': {
+                    'progressive_streaming': progressive_streaming,
+                    'chunk_size': STREAMING_CHUNK_SIZE,
+                    'step_size': STREAMING_STEP_SIZE,
+                    'schedule': STREAMING_TRAINING_SCHEDULE
+                } if progressive_streaming else None
             }
             torch.save(save_dict, model_save_path)
             print(f"保存最佳模型到: {model_save_path}")
@@ -659,16 +795,55 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
     return model, intent_labels
 
 def plot_training_history(history, save_dir):
-    """绘制训练历史
+    """绘制训练历史（向后兼容版本）
     
     Args:
         history: 训练历史字典
         save_dir: 保存目录
     """
-    plt.figure(figsize=(15, 5))
+    if 'streaming_stats' in history and any(history['streaming_stats']):
+        # 如果有流式训练统计，使用增强版本
+        plot_training_history_with_streaming(history, save_dir)
+    else:
+        # 使用原有的简单版本
+        plt.figure(figsize=(15, 5))
+        
+        # 绘制损失
+        plt.subplot(1, 2, 1)
+        plt.plot(history['train_loss'], label='train loss')
+        plt.plot(history['val_loss'], label='validation loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('loss')
+        plt.title('train and validation loss')
+        plt.legend()
+        plt.grid(True)
+        
+        # 绘制准确率
+        plt.subplot(1, 2, 2)
+        plt.plot(history['train_acc'], label='train accuracy')
+        plt.plot(history['val_acc'], label='validation accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('accuracy(%)')
+        plt.title('train and validation accuracy')
+        plt.legend()
+        plt.grid(True)
+        
+        # 保存图表
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'streaming_conformer_history.png'))
+        plt.close()
+
+def plot_training_history_with_streaming(history, save_dir):
+    """绘制包含流式训练统计的训练历史
+    
+    Args:
+        history: 训练历史字典
+        save_dir: 保存目录
+    """
+    plt.figure(figsize=(20, 10))
     
     # 绘制损失
-    plt.subplot(1, 2, 1)
+    plt.subplot(2, 3, 1)
     plt.plot(history['train_loss'], label='train loss')
     plt.plot(history['val_loss'], label='validation loss')
     plt.xlabel('Epoch')
@@ -678,7 +853,7 @@ def plot_training_history(history, save_dir):
     plt.grid(True)
     
     # 绘制准确率
-    plt.subplot(1, 2, 2)
+    plt.subplot(2, 3, 2)
     plt.plot(history['train_acc'], label='train accuracy')
     plt.plot(history['val_acc'], label='validation accuracy')
     plt.xlabel('Epoch')
@@ -687,9 +862,71 @@ def plot_training_history(history, save_dir):
     plt.legend()
     plt.grid(True)
     
+    # 绘制流式训练比例
+    if 'streaming_stats' in history and history['streaming_stats']:
+        plt.subplot(2, 3, 3)
+        streaming_ratios = [stats['streaming_ratio'] for stats in history['streaming_stats']]
+        plt.plot(streaming_ratios, 'g-', linewidth=2)
+        plt.xlabel('Epoch')
+        plt.ylabel('Streaming Ratio')
+        plt.title('Progressive Streaming Training Ratio')
+        plt.grid(True)
+        plt.ylim(0, 1)
+        
+        # 绘制流式vs常规训练批次数
+        plt.subplot(2, 3, 4)
+        streaming_batches = [stats['streaming_batches'] for stats in history['streaming_stats']]
+        regular_batches = [stats['regular_batches'] for stats in history['streaming_stats']]
+        
+        epochs = range(1, len(streaming_batches) + 1)
+        plt.bar(epochs, streaming_batches, alpha=0.7, label='Streaming Batches', color='orange')
+        plt.bar(epochs, regular_batches, alpha=0.7, label='Regular Batches', 
+                bottom=streaming_batches, color='blue')
+        plt.xlabel('Epoch')
+        plt.ylabel('Number of Batches')
+        plt.title('Streaming vs Regular Training Batches')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # 绘制流式训练损失对比
+        plt.subplot(2, 3, 5)
+        streaming_losses = [stats['streaming_loss'] for stats in history['streaming_stats'] 
+                           if stats['streaming_loss'] > 0]
+        regular_losses = [stats['regular_loss'] for stats in history['streaming_stats'] 
+                         if stats['regular_loss'] > 0]
+        
+        if streaming_losses and regular_losses:
+            epochs_streaming = [i+1 for i, stats in enumerate(history['streaming_stats']) 
+                               if stats['streaming_loss'] > 0]
+            epochs_regular = [i+1 for i, stats in enumerate(history['streaming_stats']) 
+                             if stats['regular_loss'] > 0]
+            
+            plt.plot(epochs_streaming, streaming_losses, 'o-', label='Streaming Loss', color='orange')
+            plt.plot(epochs_regular, regular_losses, 's-', label='Regular Loss', color='blue')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Streaming vs Regular Training Loss')
+            plt.legend()
+            plt.grid(True)
+        
+        # 绘制训练模式分布
+        plt.subplot(2, 3, 6)
+        total_batches = [stats['streaming_batches'] + stats['regular_batches'] 
+                        for stats in history['streaming_stats']]
+        streaming_percentages = [stats['streaming_batches'] / total if total > 0 else 0 
+                               for stats, total in zip(history['streaming_stats'], total_batches)]
+        
+        plt.plot(streaming_percentages, 'r-', linewidth=2, marker='o')
+        plt.xlabel('Epoch')
+        plt.ylabel('Actual Streaming Percentage')
+        plt.title('Actual Streaming Training Percentage')
+        plt.grid(True)
+        plt.ylim(0, 1)
+    
     # 保存图表
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'streaming_conformer_history.png'))
+    plt.savefig(os.path.join(save_dir, 'streaming_conformer_history_with_streaming.png'), 
+                dpi=300, bbox_inches='tight')
     plt.close()
 
 def parse_args():
@@ -722,6 +959,7 @@ def parse_args():
     parser.add_argument('--use_label_smoothing', action='store_true', default=USE_LABEL_SMOOTHING, help='是否使用标签平滑')
     parser.add_argument('--label_smoothing', type=float, default=LABEL_SMOOTHING, help='标签平滑系数')
     parser.add_argument('--progressive_training', action='store_true', default=PROGRESSIVE_TRAINING, help='是否使用渐进式训练')
+    parser.add_argument('--progressive_streaming', action='store_true', default=PROGRESSIVE_STREAMING_TRAINING, help='是否使用渐进式流式训练')
     parser.add_argument('--eval_interval', type=int, default=1, help='每多少个epoch评估一次')
     
     # 评估参数
@@ -754,6 +992,7 @@ def main():
     print(f"使用MixUp: {args.use_mixup}")
     print(f"标签平滑: {args.label_smoothing}")
     print(f"渐进式训练: {args.progressive_training}")
+    print(f"渐进式流式训练: {args.progressive_streaming}")
     
     # 训练模型
     model, intent_labels = train_streaming_conformer(
@@ -769,7 +1008,8 @@ def main():
         use_mixup=args.use_mixup,
         use_label_smoothing=args.use_label_smoothing,
         label_smoothing=args.label_smoothing,
-        progressive_training=args.progressive_training
+        progressive_training=args.progressive_training,
+        progressive_streaming=args.progressive_streaming
     )
     
     # 评估模型

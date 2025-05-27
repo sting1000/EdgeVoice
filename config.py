@@ -75,3 +75,25 @@ USE_COSINE_SCHEDULER = True  # 是否使用余弦学习率调度
 USE_EARLY_STOPPING = True  # 是否使用早停
 EARLY_STOPPING_PATIENCE = 8  # 早停耐心值，推荐范围：5-10
 PROGRESSIVE_TRAINING = True  # 是否使用渐进式长度训练
+
+# 渐进式流式训练参数
+PROGRESSIVE_STREAMING_TRAINING = True  # 是否启用渐进式流式训练
+STREAMING_TRAINING_SCHEDULE = {
+    'phase1': {'epochs': (1, 10), 'streaming_ratio': 0.0},   # 纯完整序列训练
+    'phase2': {'epochs': (11, 20), 'streaming_ratio': 0.3},  # 30% 流式训练
+    'phase3': {'epochs': (21, 30), 'streaming_ratio': 0.7}   # 70% 流式训练
+}
+
+# EdgeVoice验证参数
+EDGEVOICE_VALIDATION = True  # 是否启用EdgeVoice特定验证
+TARGET_ACCURACY_QUIET = 0.95  # 安静环境目标准确率
+TARGET_ACCURACY_NOISY = 0.90  # 噪声环境目标准确率
+TARGET_STABILITY_SCORE = 0.85  # 目标稳定性评分
+MAX_PREDICTION_CHANGES = 2  # 最大允许预测变化次数
+
+# 核心指令定义（用于重点评估）
+CORE_COMMANDS = ['TAKE_PHOTO', 'START_RECORDING', 'STOP_RECORDING']
+
+# 流式训练损失权重
+FINAL_PREDICTION_WEIGHT = 1.0  # 最终预测损失权重
+STABILITY_LOSS_WEIGHT = 0.1    # 稳定性损失权重（可选）
