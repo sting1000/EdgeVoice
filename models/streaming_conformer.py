@@ -520,6 +520,68 @@ class StreamingConformer(nn.Module):
         
         return logits
     
+    def get_embeddings(self, x):
+        """
+        获取嵌入向量，用于GE2E Loss训练
+        
+        Args:
+            x: 输入特征 [batch_size, seq_len, input_dim]
+            
+        Returns:
+            embeddings: 归一化的嵌入向量 [batch_size, hidden_dim]
+        """
+        # 特征投影
+        x = self.input_projection(x)
+        
+        # 位置编码
+        x = self.pos_encoding(x)
+        
+        # Conformer编码器层
+        for layer in self.conformer_layers:
+            # 对于标准前向传播，不使用缓存
+            x = layer(x)
+        
+        # 注意力池化得到嵌入向量
+        embeddings = self.attention_pooling(x)
+        
+        # 对嵌入向量进行L2归一化，这有助于稳定训练
+        embeddings = F.normalize(embeddings, p=2, dim=1)
+        
+        return embeddings
+    
+    def forward_with_embeddings(self, x):
+        """
+        同时返回分类结果和嵌入向量
+        
+        Args:
+            x: 输入特征 [batch_size, seq_len, input_dim]
+            
+        Returns:
+            logits: 分类输出 [batch_size, num_classes]
+            embeddings: 归一化的嵌入向量 [batch_size, hidden_dim]
+        """
+        # 特征投影
+        x = self.input_projection(x)
+        
+        # 位置编码
+        x = self.pos_encoding(x)
+        
+        # Conformer编码器层
+        for layer in self.conformer_layers:
+            # 对于标准前向传播，不使用缓存
+            x = layer(x)
+        
+        # 注意力池化得到嵌入向量
+        embeddings = self.attention_pooling(x)
+        
+        # 归一化嵌入向量
+        normalized_embeddings = F.normalize(embeddings, p=2, dim=1)
+        
+        # 分类
+        logits = self.classifier(embeddings)
+        
+        return logits, normalized_embeddings
+
     def predict_streaming(self, x, cached_states=None):
         """进行流式预测，返回预测结果和置信度
         
