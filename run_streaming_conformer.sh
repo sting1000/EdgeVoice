@@ -31,9 +31,9 @@ LOSS_FUNCTION="2"
 LABEL_SMOOTHING="0.02"
 # Focal loss
 #  Focal loss 正负样本比例调节参数维度与函数output一致, 此处list需要以string形式输入 (支持grid search)
-FOCAL_LOSS_ALPHA="[1,0.1,1,1,1,1,1,1]"
+FOCAL_LOSS_ALPHA="[1,0.1,1,1,1]"
 #  Focal loss 聚焦参数gamma维度与函数output一致, 此处list需要以string形式输入 (支持grid search)
-FOCAL_LOSS_GAMMA="[1,2.5,1,1,1,1,1,1]"
+FOCAL_LOSS_GAMMA="[1,2.5,1,1,1]"
 
 # 显示核心配置
 echo "=====================================

@@ -324,9 +324,6 @@ def evaluate_streaming_model(model, test_annotation_file, data_dir,
     wrong_results = []
     intent_labels = [
         "CAPTURE_AND_DESCRIBE",
-        "CAPTURE_AND_REMEMBER",
-        "CAPTURE_SCAN_QR", 
-        "GET_BATTERY_LEVEL",
         "OTHERS",
         "START_RECORDING",
         "STOP_RECORDING",

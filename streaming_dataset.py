@@ -51,8 +51,23 @@ class StreamingAudioDataset(Dataset):
         # 加载标注
         self.df = pd.read_csv(annotation_file)
         
-        # 从标注中获取类别标签
-        self.intent_labels = sorted(self.df['intent'].unique())
+        # 定义类别映射：将不需要的类别映射到OTHERS
+        self.intent_mapping = {
+            "CAPTURE_AND_DESCRIBE": "CAPTURE_AND_DESCRIBE",
+            "CAPTURE_AND_REMEMBER": "OTHERS",  # 映射到OTHERS
+            "CAPTURE_SCAN_QR": "OTHERS",       # 映射到OTHERS
+            "GET_BATTERY_LEVEL": "OTHERS",     # 映射到OTHERS
+            "OTHERS": "OTHERS",
+            "START_RECORDING": "START_RECORDING",
+            "STOP_RECORDING": "STOP_RECORDING",
+            "TAKE_PHOTO": "TAKE_PHOTO"
+        }
+        
+        # 应用类别映射
+        self.df['mapped_intent'] = self.df['intent'].map(self.intent_mapping)
+        
+        # 从映射后的类别中获取标签
+        self.intent_labels = sorted(self.df['mapped_intent'].unique())
         self.label_to_id = {label: i for i, label in enumerate(self.intent_labels)}
         
         # 特征缓存
@@ -160,11 +175,13 @@ class StreamingAudioDataset(Dataset):
     def __getitem__(self, idx):
         """获取数据集项"""
         row = self.df.iloc[idx]
-        label_id = self.label_to_id[row['intent']]
+        label_id = self.label_to_id[row['mapped_intent']]
 
         file_path = row['file_path']
         gender = row['gender']
         transcript = row['transcript']
+        # 使用映射后的意图作为标签
+        mapped_intent = row['mapped_intent']
         
         # 判断后缀是.txt，则直接读取特征向量
         if file_path.endswith('.txt'):
