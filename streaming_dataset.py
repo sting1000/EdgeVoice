@@ -41,8 +41,8 @@ class StreamingAudioDataset(Dataset):
         """
         self.data_dir = data_dir
         self.streaming_mode = streaming_mode
-        self.chunk_size = chunk_size
-        self.step_size = step_size
+        self.chunk_size = int(chunk_size)
+        self.step_size = int(step_size)
         self.use_random_crop = use_random_crop
         self.use_feature_augmentation = use_feature_augmentation
         self.jitter_ratio = jitter_ratio
@@ -150,91 +150,166 @@ class StreamingAudioDataset(Dataset):
             features = add_feature_mask(features, mask_ratio)
             return features
     
+    # 直接读取特征向量txt文件，而不是load wav
+    def read_feature_txt(self, txt_path):
+        # 假设每行是tab或空格分隔的数字，读成二维数组，返回np.ndarray: (n_frames, feature_dim)
+        file_path = os.path.join(self.data_dir, txt_path)
+        array = np.loadtxt(file_path, dtype=np.uint16)
+        return array.view(np.float16)
+
     def __getitem__(self, idx):
         """获取数据集项"""
         row = self.df.iloc[idx]
         label_id = self.label_to_id[row['intent']]
+
+        file_path = row['file_path']
+        gender = row['gender']
+        transcript = row['transcript']
         
-        # 在流式模式和启用特征增强时跳过缓存
-        use_cache = self.cache_dir is not None and not (self.streaming_mode and self.use_feature_augmentation)
-        
-        # 尝试从缓存加载特征
-        cached_data = None
-        cache_path = None
-        if use_cache:
-            cache_path = self._get_cache_path(idx, self.streaming_mode)
-            cached_data = self._load_cached_features(cache_path)
-        
-        if cached_data is not None:
-            if self.streaming_mode:
-                # 对缓存结果进行额外验证
-                if len(cached_data.get('chunk_features', [])) == 0:
-                    # 缓存数据异常，重新生成
-                    print(f"警告: ID={idx} 的缓存特征无效，重新生成")
-                    # 继续执行未缓存的逻辑
-                else:
-                    # 在使用缓存数据时应用特征增强
-                    chunk_features = cached_data['chunk_features']
+        # 判断后缀是.txt，则直接读取特征向量
+        if file_path.endswith('.txt'):
+            features = self.read_feature_txt(file_path)
+        else:
+            # 处理.wav文件 - 加载音频并提取特征
+            try:
+                # 检查缓存
+                cache_path = self._get_cache_path(idx, self.streaming_mode)
+                cached_result = self._load_cached_features(cache_path)
+                
+                if cached_result is not None:
+                    if self.streaming_mode:
+                        chunk_features = cached_result
+                        if self.use_feature_augmentation:
+                            chunk_features = self._apply_feature_augmentation(chunk_features)
+                        return {
+                            'chunk_features': chunk_features,
+                            'label': label_id,
+                            'file_path': file_path,
+                            'gender': gender,
+                            'transcript': transcript
+                        }
+                    else:
+                        features = cached_result
+                        if self.use_feature_augmentation:
+                            features = self._apply_feature_augmentation(features)
+                        return {
+                            'features': features,
+                            'label': label_id,
+                            'file_path': file_path,
+                            'gender': gender,
+                            'transcript': transcript
+                        }
+                
+                # 加载音频文件
+                audio, sr = self._load_audio(idx)
+                
+                # 提取特征
+                if self.streaming_mode:
+                    # 流式模式 - 使用streaming_feature_extractor
+                    chunk_features, _ = streaming_feature_extractor(
+                        audio, sr, 
+                        chunk_size=self.chunk_size, 
+                        step_size=self.step_size
+                    )
+                    
+                    # 确保至少有一个特征块
+                    if len(chunk_features) == 0:
+                        chunk_features = [np.zeros((self.chunk_size, N_MFCC * 3))]
+                    
+                    # 保存到缓存
+                    self._save_to_cache(cache_path, chunk_features)
+                    
+                    # 应用特征增强
                     if self.use_feature_augmentation:
                         chunk_features = self._apply_feature_augmentation(chunk_features)
+                    
                     return {
                         'chunk_features': chunk_features,
-                        'label': label_id
+                        'label': label_id,
+                        'file_path': file_path,
+                        'gender': gender,
+                        'transcript': transcript
                     }
-            else:
-                features = cached_data['features']
-                if self.use_feature_augmentation:
-                    features = self._apply_feature_augmentation(features)
-                return {
-                    'features': features,
-                    'label': label_id
-                }
-        
-        # 如果没有缓存，加载音频并提取特征
-        audio, sr = self._load_audio(idx)
-        
+                else:
+                    # 非流式模式 - 使用extract_features
+                    features = extract_features(audio, sr)
+                    
+                    # 确保特征不为空
+                    if features is None or features.shape[0] == 0:
+                        features = np.zeros((10, N_MFCC * 3))  # 默认10帧
+                    
+                    # 保存到缓存
+                    self._save_to_cache(cache_path, features)
+                    
+                    # 应用特征增强
+                    if self.use_feature_augmentation:
+                        features = self._apply_feature_augmentation(features)
+                    
+                    return {
+                        'features': features,
+                        'label': label_id,
+                        'file_path': file_path,
+                        'gender': gender,
+                        'transcript': transcript
+                    }
+                    
+            except Exception as e:
+                print(f"处理音频文件时出错 {file_path}: {e}")
+                # 返回默认特征以避免训练中断
+                if self.streaming_mode:
+                    default_chunk_features = [np.zeros((self.chunk_size, N_MFCC * 3))]
+                    return {
+                        'chunk_features': default_chunk_features,
+                        'label': label_id,
+                        'file_path': file_path,
+                        'gender': gender,
+                        'transcript': transcript
+                    }
+                else:
+                    default_features = np.zeros((10, N_MFCC * 3))
+                    return {
+                        'features': default_features,
+                        'label': label_id,
+                        'file_path': file_path,
+                        'gender': gender,
+                        'transcript': transcript
+                    }
+
+        # 原来的.txt文件处理逻辑
+        # 数据增强
+        # if self.use_feature_augmentation:
+        #     features = self._apply_feature_augmentation(features)
         if self.streaming_mode:
-            # 流式模式：提取分块特征
-            chunk_features, _ = streaming_feature_extractor(
-                audio, sr, self.chunk_size, self.step_size,
-                force_recalculate=self.use_feature_augmentation  # 启用特征增强时强制重新计算
-            )
-            
-            # 如果没有有效的特征块，创建一个空特征作为备选
+            chunk_features = []
+            num_frames = features.shape[0]
+            for start in range(0, num_frames, self.step_size):
+                end = start + self.chunk_size
+                chunk = features[start:end]
+                if chunk.shape[0] < self.chunk_size:
+                    pad_width = self.chunk_size - chunk.shape[0]
+                    chunk = np.pad(chunk, ((0, pad_width), (0, 0)), mode='constant')
+                chunk_features.append(chunk)
             if len(chunk_features) == 0:
-                chunk_features = [np.zeros((1, N_MFCC * 3))]
-            
-            # 应用特征增强
+                chunk_features = [np.zeros((self.chunk_size, features.shape[1]))]
             if self.use_feature_augmentation:
                 chunk_features = self._apply_feature_augmentation(chunk_features)
-            
-            # 缓存特征（如果启用了缓存且没有启用特征增强）
-            if cache_path is not None and not self.use_feature_augmentation:
-                self._save_to_cache(cache_path, {
-                    'chunk_features': chunk_features
-                })
-            
             return {
                 'chunk_features': chunk_features,
-                'label': label_id
+                'label': label_id,
+                'file_path': file_path,
+                'gender': gender,
+                'transcript': transcript
             }
         else:
-            # 完整音频模式：提取全局特征
-            features = extract_features(audio, sr)
-            
-            # 应用特征增强
+            # 非流式直接用全体特征
             if self.use_feature_augmentation:
                 features = self._apply_feature_augmentation(features)
-            
-            # 缓存特征（如果启用了缓存且没有启用特征增强）
-            if cache_path is not None and not self.use_feature_augmentation:
-                self._save_to_cache(cache_path, {
-                    'features': features
-                })
-            
             return {
                 'features': features,
-                'label': label_id
+                'label': label_id,
+                'file_path': file_path,
+                'gender': gender,
+                'transcript': transcript
             }
 
 def collate_streaming_batch(batch):

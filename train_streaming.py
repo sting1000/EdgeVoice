@@ -5,6 +5,7 @@ import os
 import argparse
 import time
 import random
+import subprocess
 import numpy as np
 import torch
 import torch.nn as nn
@@ -15,6 +16,10 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
 import seaborn as sns
 import pandas as pd
+import itertools
+import copy
+import traceback
+
 
 from config import *
 from models.streaming_conformer import StreamingConformer
@@ -47,6 +52,34 @@ class LabelSmoothingCrossEntropy(nn.Module):
             true_dist.scatter_(1, target.unsqueeze(1), 1.0 - self.smoothing)
         
         return torch.mean(torch.sum(-true_dist * nn.functional.log_softmax(pred, dim=1), dim=1))
+
+class FocalLoss(nn.Module):
+    """Focal Loss Function"""
+    def __init__(self, alpha=[], gamma=[]):
+        super().__init__()
+        self.alpha = torch.tensor(alpha,  dtype=torch.float32) # 正负样本比例调节参数
+        self.gamma = torch.tensor(gamma,  dtype=torch.float32) # 聚焦参数gamma
+        self.CrossEntropyLoss = nn.CrossEntropyLoss
+        
+    def forward(self, pred, target):
+        # 计算pt
+        pt = nn.functional.softmax(pred, dim=1)
+        target = nn.functional.one_hot(target, num_classes=len(INTENT_CLASSES)).to(torch.float32)
+        pt = pt * target + (1 - pt) * (1 - target)
+
+        # 加入聚焦参数gamma
+        focalLoss = - torch.log(pt)
+        if self.gamma.shape != torch.Size([0]):
+            self.gamma = self.gamma.to(pt.device)
+            focalLoss = ((1 - pt) ** self.gamma) * focalLoss
+        else:
+            focalLoss = torch.pow(1 - pt, 0) * focalLoss
+
+        # 加入正负样本比例调节参数alpha
+        if self.alpha.shape != torch.Size([0]):
+            localAlpha = torch.matmul(target, self.alpha.to(focalLoss.device))
+            focalLoss = focalLoss * localAlpha[:, None]
+        return torch.mean(torch.sum(focalLoss))
 
 def prepare_data_loaders(annotation_file, data_dir=DATA_DIR, batch_size=32, 
                           valid_annotation_file=None, val_split=0.1, seed=42):
@@ -158,18 +191,6 @@ def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE,
             start = random.randint(0, max_start) if max_start > 0 else 0
             features = features[:, start:start+seq_length, :]
         
-        # 应用特征增强
-        features = apply_augmentations(features, phase='train')
-        
-        # 初始化MixUp变量
-        apply_mixup = use_mixup and random.random() < 0.5
-        labels_a = labels
-        labels_b = None
-        lam = 1.0
-        
-        # MixUp数据增强
-        if apply_mixup:
-            features, labels_a, labels_b, lam = mixup_features(features, labels, alpha=mixup_alpha)
         
         # 清零梯度
         optimizer.zero_grad()
@@ -177,12 +198,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE,
         # 前向传播
         outputs = model(features)
         
-        # 计算损失
-        if apply_mixup:
-            # MixUp损失
-            loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
-        else:
-            loss = criterion(outputs, labels)
+        loss = criterion(outputs, labels)
         
         # 反向传播和优化
         loss.backward()
@@ -197,11 +213,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE,
         _, predicted = torch.max(outputs, 1)
         total += labels.size(0)
         
-        if apply_mixup:
-            # MixUp下使用最高概率的标签计算准确率
-            correct += (predicted == labels_a).sum().item() * lam + (predicted == labels_b).sum().item() * (1 - lam)
-        else:
-            correct += (predicted == labels).sum().item()
+        correct += (predicted == labels).sum().item()
         
         # 更新进度条
         progress_bar.set_postfix({
@@ -307,15 +319,40 @@ def evaluate_streaming_model(model, test_annotation_file, data_dir,
     all_labels = []
     pred_changes = []
     final_confidences = []
-    
+
+    # 用于记录结果的列表
+    wrong_results = []
+    intent_labels = [
+        "CAPTURE_AND_DESCRIBE",
+        "CAPTURE_AND_REMEMBER",
+        "CAPTURE_SCAN_QR", 
+        "GET_BATTERY_LEVEL",
+        "OTHERS",
+        "START_RECORDING",
+        "STOP_RECORDING",
+        "TAKE_PHOTO"
+    ]
+
+    num_classes = len(intent_labels)
+    confusion = np.zeros((num_classes, num_classes), dtype=int)
+    target_intent_totals = np.zeros(num_classes, dtype=int)
+    target_intent_corrects = np.zeros(num_classes, dtype=int)
+    others_total = 0
+    others_to_non_others = 0 
     # 测试每个样本
     for i in tqdm(range(len(test_dataset)), desc="评估流式模型"):
         sample = test_dataset[i]
         chunk_features = sample['chunk_features']
         true_label = sample['label']
+        file_name = sample['file_path']
+        gender = sample['gender']
+        transcript = sample['transcript']
         
         # 重置模型流式状态
-        model.reset_streaming_state()
+        if hasattr(model, 'module') and hasattr(model.module, 'reset_streaming_state'):
+            model.module.reset_streaming_state()
+        else:
+            model.reset_streaming_state()
         cached_states = None
         
         # 过程中的预测
@@ -329,7 +366,10 @@ def evaluate_streaming_model(model, test_annotation_file, data_dir,
             
             # 流式预测
             with torch.no_grad():
-                pred, conf, cached_states = model.predict_streaming(chunk_tensor, cached_states)
+                if hasattr(model, "module") and hasattr(model.module, "predict_streaming"):
+                    pred, conf, cached_states = model.module.predict_streaming(chunk_tensor, cached_states)
+                else:
+                    pred, conf, cached_states = model.predict_streaming(chunk_tensor, cached_states)
             
             pred_label = pred.item()
             conf_value = conf.item()
@@ -355,6 +395,15 @@ def evaluate_streaming_model(model, test_annotation_file, data_dir,
         # 统计正确率
         total += 1
         correct += (final_pred == true_label)
+        if final_pred != true_label:
+            wrong_results.append({
+                "true_label": intent_labels[true_label],
+                "final_pred": intent_labels[final_pred],
+                "cofidence": final_conf,
+                "file_name": file_name,
+                "gender": gender,
+                "transcript": transcript
+            })
         
         # 记录潜伏期（从开始到决策的时间）
         latency = len(predictions) * STREAMING_STEP_SIZE * 0.01  # 秒
@@ -363,27 +412,142 @@ def evaluate_streaming_model(model, test_annotation_file, data_dir,
         # 保存结果用于详细分析
         all_preds.append(final_pred)
         all_labels.append(true_label)
-    
+        confusion[true_label, final_pred] += 1
+        target_intent_totals[true_label] += 1
+        if final_pred == true_label:
+            target_intent_corrects[true_label] += 1
+        if true_label == intent_labels.index("OTHERS"):
+            others_total += 1
+            if final_pred != intent_labels.index("OTHERS"):
+                others_to_non_others += 1 
+                
+
+    lines = []
+    # 新增不记错的统计
+    OTHERS_IDX = intent_labels.index("OTHERS")
+    intent_label_names = test_dataset.intent_labels
+    filtered_true = []
+    filtered_pred = []
+    intent_accs = []   # 目标意图准确率收集
+    intent_conf_rates = []  # 指令混淆率收集
+
+    for label, pred in zip(all_labels, all_preds):
+        if label == OTHERS_IDX:
+            filtered_true.append(label)
+            filtered_pred.append(pred)
+        elif pred != OTHERS_IDX:
+            filtered_true.append(label)
+            filtered_pred.append(pred)
+    report_str_filtered = classification_report(filtered_true, filtered_pred, target_names=intent_label_names, digits=4)
+    lines.append("\n====== 自定义分类到OTHERS不计错统计 ======")
+
+    lines.append("目标意图准确率：")
+    for idx, label in enumerate(intent_labels):
+        if label == "OTHERS":
+            continue
+        num = sum(1 for t in filtered_true if t == idx)
+        correct = sum(1 for t, p in zip(filtered_true, filtered_pred) if t == idx and p == idx)
+        acc = correct / num if num > 0 else 0
+        intent_accs.append(acc)
+        lines.append(f"{label} - 目标意图准确率: {acc:.4f} ({correct}/{num})")
+    lines.append("-"*30)
+    lines.append("指令混淆率：")
+    for idx, label in enumerate(intent_labels):
+        if label == "OTHERS":
+            continue
+        num = sum(1 for t in filtered_true if t == idx)
+        confused = sum(1 for t, p in zip(filtered_true, filtered_pred) if t == idx and p != idx)
+        conf_rate = confused / num if num > 0 else 0
+        intent_conf_rates.append(conf_rate)
+        lines.append(f"{label} - 指令混淆率：{conf_rate:.4f} ({confused}/{num})")
+
+    # 统计每类样本数量
+    intent_nums = [sum(1 for t in filtered_true if t == idx) for idx, label in enumerate(intent_labels) if label != "OTHERS"]
+    # 加权平均
+    if len(intent_accs) > 0:
+        weighted_avg_acc = sum(a*n for a, n in zip(intent_accs, intent_nums)) / sum(intent_nums)
+        lines.append(f"目标意图准确率（加权平均）: {weighted_avg_acc:.4f}")
+    if len(intent_conf_rates) > 0:
+        weighted_avg_conf = sum(a*n for a, n in zip(intent_conf_rates, intent_nums)) / sum(intent_nums)
+        lines.append(f"指令混淆率（加权平均）: {weighted_avg_conf:.4f}")
+
+
+    lines.append("-"*30)
+    others_total_f = sum(1 for t in filtered_true if t == OTHERS_IDX)
+    others_to_non_others_f = sum(1 for t, p in zip(filtered_true, filtered_pred) if t == OTHERS_IDX and p != OTHERS_IDX)
+    if others_total_f:
+        lines.append(f'错误接受率（OTHERS类被识别为有效意图的比例）：{others_to_non_others_f / others_total_f:.4f}  ({others_to_non_others_f}/{others_total_f})')
+    else:
+        lines.append("OTHERS样本数为0")
+    lines.append("="*30)
+    lines.append("\n分类报告:")
+    lines.append(report_str_filtered)
+
+    lines.append("="*60)
+
     # 计算总体准确率
     accuracy = correct / total
-    
+
     # 计算平均潜伏期和早停比例
     avg_latency = sum(latencies) / len(latencies) if latencies else 0
     early_stop_rate = early_stops / total
     
     # 打印评估结果
-    print("\n流式评估结果:")
-    print(f"准确率: {accuracy:.4f}")
-    print(f"平均潜伏期: {avg_latency:.4f} 秒")
-    print(f"早停比例: {early_stop_rate:.4f}")
-    print(f"平均预测变化次数: {sum(pred_changes) / len(pred_changes):.2f}")
-    print(f"平均最终置信度: {sum(final_confidences) / len(final_confidences):.4f}")
-    
+    lines.append("\n流式评估结果:")
+    lines.append(f"准确率: {accuracy:.4f}")
+    lines.append(f"平均潜伏期: {avg_latency:.4f} 秒")
+    lines.append(f"早停比例: {early_stop_rate:.4f}")
+    lines.append(f"平均预测变化次数: {sum(pred_changes) / len(pred_changes):.2f}")
+    lines.append(f"平均最终置信度: {sum(final_confidences) / len(final_confidences):.4f}")
+    lines.append("="*30)
+
+    all_acc = []
+    all_conf_rate = []
+    all_num = []
+
+    lines.append("目标意图准确率：")
+    for idx, label in enumerate(intent_labels):
+        if label == "OTHERS":
+            continue
+        num = target_intent_totals[idx]
+        correct = target_intent_corrects[idx]
+        acc = correct / num if num > 0 else 0
+        all_acc.append(acc)
+        all_num.append(num)
+        lines.append(f"{label} - 目标意图准确率: {acc:.4f} ({correct}/{num})")
+    lines.append("-"*30)
+    lines.append("指令混淆率：")
+    for idx, label in enumerate(intent_labels):
+        if label == "OTHERS":
+            continue
+        num = target_intent_totals[idx]
+        confused = num - target_intent_corrects[idx]
+        conf_rate = confused / num if num > 0 else 0
+        all_conf_rate.append(conf_rate)
+        lines.append(f"{label} - 指令混淆率：{conf_rate:.4f} ({confused}/{num})")
+    # 加权平均
+    total_num = sum(all_num)
+    if total_num > 0:
+        weighted_acc = sum(a * n for a, n in zip(all_acc, all_num)) / total_num
+        weighted_conf_rate = sum(c * n for c, n in zip(all_conf_rate, all_num)) / total_num
+        lines.append(f"目标意图准确率（加权平均）: {weighted_acc:.4f}")
+        lines.append(f"指令混淆率（加权平均）: {weighted_conf_rate:.4f}")
+
+    sum_confused = np.sum(target_intent_totals[:-1] - target_intent_corrects[:-1])
+    sum_totals = np.sum(target_intent_totals[:-1])
+    lines.append("-"*30)
+    lines.append(f'错误接受率（OTHERS类被识别为有效意图的比例）：{others_to_non_others / others_total:.4f}  ({others_to_non_others}/{others_total})' if others_total else "OTHERS样本数为0")
+    lines.append("="*30)
     # 计算分类报告
-    from sklearn.metrics import classification_report
     intent_label_names = test_dataset.intent_labels
-    print("\n分类报告:")
-    print(classification_report(all_labels, all_preds, target_names=intent_label_names))
+    lines.append("\n分类报告:")
+    report_str = classification_report(all_labels, all_preds, target_names=intent_label_names)
+    report_dict = classification_report(all_labels, all_preds, target_names=intent_label_names, output_dict=True)
+    lines.append(report_str)
+
+
+    final_report_str = "\n".join(lines)
+    print(final_report_str)
     
     # 绘制混淆矩阵
     cm = confusion_matrix(all_labels, all_preds)
@@ -414,7 +578,9 @@ def evaluate_streaming_model(model, test_annotation_file, data_dir,
     
     plt.tight_layout()
     plt.savefig(os.path.join(os.path.dirname(save_path), "prediction_stability.png"))
-    
+    df = pd.DataFrame(wrong_results)
+    df.to_csv(os.path.join(os.path.dirname(save_path), "wrong_result.csv"), index=False)
+
     # 保存结果
     results = {
         'accuracy': accuracy,
@@ -433,14 +599,18 @@ def evaluate_streaming_model(model, test_annotation_file, data_dir,
     import pickle
     with open(save_path, 'wb') as f:
         pickle.dump(results, f)
-    
-    return accuracy
+
+    return final_report_str, report_dict
 
 def train_streaming_conformer(data_dir, annotation_file, model_save_path, 
                             valid_annotation_file=None, num_epochs=30, batch_size=32, seed=42,
-                            learning_rate=LEARNING_RATE, weight_decay=0.01,
-                            use_mixup=USE_MIXUP, use_label_smoothing=USE_LABEL_SMOOTHING,
-                            label_smoothing=LABEL_SMOOTHING,
+                            num_layers= CONFORMER_LAYERS, learning_rate=LEARNING_RATE, weight_decay=0.01,
+                            dropout=CONFORMER_DROPOUT, kernel_size=CONFORMER_CONV_KERNEL_SIZE,
+                            use_mixup=USE_MIXUP,
+                            loss_function=LOSS_FUNC_CROSS_ENTROPY,
+                            label_smoothing=LABEL_SMOOTHING_VALUE,
+                            focal_loss_alpha = FOCAL_LOSS_ALPHA_VALUE,
+                            focal_loss_gamma = FOCAL_LOSS_GAMMA_VALUE,
                             progressive_training=PROGRESSIVE_TRAINING):
     """训练流式Conformer模型
     
@@ -455,8 +625,10 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
         learning_rate: 学习率
         weight_decay: 权重衰减
         use_mixup: 是否使用MixUp
-        use_label_smoothing: 是否使用标签平滑
-        label_smoothing: 标签平滑参数
+        loss_function: 选择损失函数0(Cross Entrop),1(Label Smoothing), 2(Focal Loss)
+        label_smoothing: 标签平滑参数 (LabelSmoothingCrossEntropy)
+        focal_loss_alpha(list): Focal loss 正负样本比例调节参数维度与函数output一致
+        focal_loss_gamma(list): Focal loss 聚焦参数gamma维度与函数output一致
         progressive_training: 是否使用渐进式训练
     
     Returns:
@@ -479,10 +651,9 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
     input_dim = N_MFCC * 3  # MFCC及其Delta特征
     hidden_dim = CONFORMER_HIDDEN_SIZE
     num_classes = len(intent_labels)
-    num_layers = CONFORMER_LAYERS
     num_heads = CONFORMER_ATTENTION_HEADS
-    dropout = CONFORMER_DROPOUT
-    kernel_size = CONFORMER_CONV_KERNEL_SIZE
+    dropout = dropout
+    kernel_size = kernel_size
     expansion_factor = CONFORMER_FF_EXPANSION_FACTOR
     
     model = StreamingConformer(
@@ -495,12 +666,18 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
         kernel_size=kernel_size,
         expansion_factor=expansion_factor
     )
+    if torch.cuda.device_count() > 1:
+        print(f"使用{torch.cuda.device_count()}个GPU进行并行训练")
+        model = nn.DataParallel(model)
     model = model.to(DEVICE)
     
     # 选择损失函数
-    if use_label_smoothing:
+    if loss_function == LOSS_FUNC_LABEL_SMOOTHING:
         criterion = LabelSmoothingCrossEntropy(smoothing=label_smoothing)
         print(f"使用标签平滑损失，平滑参数: {label_smoothing}")
+    elif loss_function == LOSS_FUNC_FOCAL_LOSS:
+        criterion = FocalLoss(alpha=focal_loss_alpha, gamma=focal_loss_gamma)
+        print(f"使用Focal Loss 损失函数，正负样本比例调节参数alpha: {focal_loss_alpha}，聚焦参数gamma {focal_loss_gamma}")
     else:
         criterion = nn.CrossEntropyLoss()
         print("使用标准交叉熵损失")
@@ -532,7 +709,7 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
         # 渐进式长度训练 - 从短序列开始，增量增加序列长度
         # 根据模型输入特性调整序列长度范围
         progressive_lengths = [
-            20, 30, 40, 60, 80, 100, None  # None表示使用完整序列
+            32, 64, 96, 128, 160, 192, None  # None表示使用完整序列
         ]
         print(f"启用渐进式长度训练，序列长度进度: {progressive_lengths}")
     else:
@@ -560,7 +737,7 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
     print(f"总训练轮数: {num_epochs}")
     
     start_time = time.time()
-    
+
     for epoch in range(num_epochs):
         # 确定当前使用的序列长度
         if progressive_training:
@@ -655,8 +832,8 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
     # 加载最佳模型
     checkpoint = torch.load(model_save_path)
     model.load_state_dict(checkpoint['model_state_dict'])
-    
-    return model, intent_labels
+
+    return model, intent_labels, history
 
 def plot_training_history(history, save_dir):
     """绘制训练历史
@@ -706,21 +883,24 @@ def parse_args():
     parser.add_argument('--model_type', type=str, default='streaming_conformer', help='模型类型')
     parser.add_argument('--model_save_path', type=str, required=True, help='模型保存路径')
     parser.add_argument('--hidden_dim', type=int, default=CONFORMER_HIDDEN_SIZE, help='隐藏层维度')
-    parser.add_argument('--num_layers', type=int, default=CONFORMER_LAYERS, help='Conformer层数')
+    parser.add_argument('--num_layers', nargs="+", type=int, default=CONFORMER_LAYERS, help='Conformer层数')
     parser.add_argument('--num_heads', type=int, default=CONFORMER_ATTENTION_HEADS, help='注意力头数')
-    parser.add_argument('--kernel_size', type=int, default=CONFORMER_CONV_KERNEL_SIZE, help='卷积核大小')
     
     # 训练参数
     parser.add_argument('--num_epochs', type=int, default=NUM_EPOCHS, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=BATCH_SIZE, help='批大小')
-    parser.add_argument('--learning_rate', type=float, default=LEARNING_RATE, help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=0.01, help='权重衰减')
-    parser.add_argument('--seed', type=int, default=42, help='随机种子')
+    parser.add_argument('--learning_rate', nargs="+", type=float, default=LEARNING_RATE, help='学习率')
+    parser.add_argument('--dropout', nargs="+", type=float, default=CONFORMER_DROPOUT, help='dropout')
+    parser.add_argument('--kernel_size', nargs="+", type=int, default=CONFORMER_CONV_KERNEL_SIZE, help='卷积核大小')
+    parser.add_argument('--weight_decay', nargs="+", type=float, default=0.01, help='权重衰减')
+    parser.add_argument('--seed', type=int, default=41, help='随机种子')
     
     # 增强和训练策略
     parser.add_argument('--use_mixup', action='store_true', default=USE_MIXUP, help='是否使用MixUp增强')
-    parser.add_argument('--use_label_smoothing', action='store_true', default=USE_LABEL_SMOOTHING, help='是否使用标签平滑')
-    parser.add_argument('--label_smoothing', type=float, default=LABEL_SMOOTHING, help='标签平滑系数')
+    parser.add_argument('--loss_function', nargs="+", type=int, default=LOSS_FUNC_CROSS_ENTROPY, help='选择使用的loss function')
+    parser.add_argument('--label_smoothing', nargs="+", type=float, default=LABEL_SMOOTHING_VALUE, help='标签平滑系数')
+    parser.add_argument('--focal_loss_alpha', nargs="+", type=str, default="[]", help='Focal loss 正负样本比例调节参数')
+    parser.add_argument('--focal_loss_gamma', nargs="+", type=str, default="[]", help='Focal loss 聚焦参数gamma')
     parser.add_argument('--progressive_training', action='store_true', default=PROGRESSIVE_TRAINING, help='是否使用渐进式训练')
     parser.add_argument('--eval_interval', type=int, default=1, help='每多少个epoch评估一次')
     
@@ -730,11 +910,68 @@ def parse_args():
     
     return parser.parse_args()
 
-def main():
-    """主函数"""
-    # 解析命令行参数
-    args = parse_args()
-    
+def string_to_float_list(listStr):
+    res = []
+    listStr = listStr.strip().replace("[", "").replace("]", "").replace("\n", "")
+    for ele in listStr.split(","):
+        ele = ele.strip()
+        if not ele:
+            continue
+        res.append(float(ele))
+    return res
+
+LOSS_FUNC_LABEL_SMOOTHING = 1
+LOSS_FUNC_FOCAL_LOSS = 2
+def prepare_grid_search(args):
+    # 1. 定义所有超参数字典（每项都是一个list）
+    search_space = {
+        "learning_rate": args.learning_rate,
+        "num_layers": args.num_layers,
+        "dropout": args.dropout,
+        "kernel_size": args.kernel_size,
+        "weight_decay": args.weight_decay,
+        "loss_function": args.loss_function,
+        "loss_function_label_smoothing": args.label_smoothing,
+        "loss_function_focal_loss_alpha": args.focal_loss_alpha,
+        "loss_function_focal_loss_gamma": args.focal_loss_gamma,
+    }
+    # 2. 准备 Keys 列表 (便于顺次展开组合)
+    keys = ["learning_rate", "num_layers", "dropout", "kernel_size", "weight_decay", "loss_function"]
+    # 单独处理 loss 相关交叉（后面组合时动态加进去）
+    grid_input_values = []
+    # 3. 穷举前5个主超参（不含loss-related次级超参）
+    for vals in itertools.product(*(search_space[k] for k in keys)):
+        # 组合一个dict
+        cur_hparam = dict(zip(keys, vals))
+        # loss相关处理
+        lf = cur_hparam["loss_function"]
+        if lf == LOSS_FUNC_LABEL_SMOOTHING:
+            # 仅label_smoothing变，focal的设为默认第0值
+            for label_smoothing in search_space["loss_function_label_smoothing"]:
+                hparam = copy.deepcopy(cur_hparam)
+                hparam["loss_function_label_smoothing"] = label_smoothing
+                hparam["loss_function_focal_loss_alpha"] = search_space["loss_function_focal_loss_alpha"][0]
+                hparam["loss_function_focal_loss_gamma"] = search_space["loss_function_focal_loss_gamma"][0]
+                grid_input_values.append(hparam)
+        elif lf == LOSS_FUNC_FOCAL_LOSS:
+            # 仅focal alpha/gamma变，label_smoothing用默认值
+            for alpha in search_space["loss_function_focal_loss_alpha"]:
+                for gamma in search_space["loss_function_focal_loss_gamma"]:
+                    hparam = copy.deepcopy(cur_hparam)
+                    hparam["loss_function_label_smoothing"] = search_space["loss_function_label_smoothing"][0]
+                    hparam["loss_function_focal_loss_alpha"] = alpha
+                    hparam["loss_function_focal_loss_gamma"] = gamma
+                    grid_input_values.append(hparam)
+        else:
+            # 都用默认第0个值
+            hparam = copy.deepcopy(cur_hparam)
+            hparam["loss_function_label_smoothing"] = search_space["loss_function_label_smoothing"][0]
+            hparam["loss_function_focal_loss_alpha"] = search_space["loss_function_focal_loss_alpha"][0]
+            hparam["loss_function_focal_loss_gamma"] = search_space["loss_function_focal_loss_gamma"][0]
+            grid_input_values.append(hparam)
+    return grid_input_values
+
+def print_hyperpara_setting(args):
     # 配置
     print("\n=== 流式Conformer训练配置 ===")
     print(f"数据目录: {args.data_dir}")
@@ -752,47 +989,118 @@ def main():
     print(f"批大小: {args.batch_size}")
     print(f"学习率: {args.learning_rate}")
     print(f"使用MixUp: {args.use_mixup}")
-    print(f"标签平滑: {args.label_smoothing}")
+    print(f"损失函数: {args.loss_function}")
+    if LOSS_FUNC_LABEL_SMOOTHING in args.loss_function:
+        print(f"标签平滑: {args.label_smoothing}")
+    elif LOSS_FUNC_FOCAL_LOSS in args.loss_function:
+        print(f"Focal Loss Alpha: {args.focal_loss_alpha}")
+        print(f"Focal Loss Gamma: {args.focal_loss_gamma}")
     print(f"渐进式训练: {args.progressive_training}")
+
+
+def main():
+    """主函数"""
+    # 解析命令行参数
+    args = parse_args()
+    print_hyperpara_setting(args)
+    grid_input_values = prepare_grid_search(args)
+
+    # 保留总hyper parameter信息
+    summary_data_path =  os.path.join(os.path.dirname(args.model_save_path), "training_summary_data")
+    os.makedirs(summary_data_path,  exist_ok=True)
+    with open(os.path.join(summary_data_path, "hyperparameters.txt"), "w") as f:
+        f.write(f"hyper parameter name    : hyper parameter value")
+        for hyper_para in args._get_kwargs():
+            f.write(f"{hyper_para[0]:24}: {hyper_para[1]}\n")
     
+    # 保留总训练信息
+    summary_tarin_result = pd.DataFrame(columns=["module_name", "max_train_accuracy"])
     # 训练模型
-    model, intent_labels = train_streaming_conformer(
-        data_dir=args.data_dir,
-        annotation_file=args.annotation_file,
-        model_save_path=args.model_save_path,
-        valid_annotation_file=args.valid_annotation_file,
-        num_epochs=args.num_epochs,
-        batch_size=args.batch_size,
-        seed=args.seed,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        use_mixup=args.use_mixup,
-        use_label_smoothing=args.use_label_smoothing,
-        label_smoothing=args.label_smoothing,
-        progressive_training=args.progressive_training
-    )
-    
-    # 评估模型
-    if args.evaluate and args.test_annotation_file:
-        print("\n=== 评估流式模型 ===")
-        print(f"测试数据: {args.test_annotation_file}")
-        print(f"置信度阈值: {args.confidence_threshold}")
-        
-        # 模型评估路径
-        eval_save_path = os.path.join(os.path.dirname(args.model_save_path), "streaming_eval_results.pkl")
-        
-        # 流式评估
-        accuracy = evaluate_streaming_model(
-            model=model,
-            test_annotation_file=args.test_annotation_file,
-            data_dir=args.data_dir,
-            save_path=eval_save_path,
-            device=DEVICE,
-            confidence_threshold=args.confidence_threshold
-        )
-        
-        print(f"\n流式评估准确率: {accuracy:.4f}")
-    
+    for grid_idx, grid_input_value in enumerate(grid_input_values):
+        grid_input_value = grid_input_values[grid_idx]
+        grid_train_time = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        module_name = f"module_{grid_train_time}"
+        try:
+            summary_tarin_result.loc[grid_idx, "module_name"] = module_name
+            model_save_path = os.path.join(os.path.dirname(args.model_save_path), module_name)
+            os.makedirs(model_save_path, exist_ok=True)
+            f_res = open(os.path.join(model_save_path, "module_data.txt"), "w")
+            f_res.write("hyper parameters:\n")
+            print("当前超参数:\n")
+            for para_key in grid_input_value:
+                f_res.write(f"    {para_key}: {grid_input_value[para_key]}\n")
+                print(f"    {para_key}: {grid_input_value[para_key]}")
+
+            local_model_path = os.path.join(model_save_path, os.path.basename(args.model_save_path))
+            model, intent_labels, train_history = train_streaming_conformer(
+                data_dir=args.data_dir,
+                annotation_file=args.annotation_file,
+                model_save_path=local_model_path,
+                valid_annotation_file=args.valid_annotation_file,
+                num_epochs=args.num_epochs,
+                batch_size=args.batch_size,
+                seed=args.seed,
+                num_layers=grid_input_value["num_layers"],
+                learning_rate=grid_input_value["learning_rate"],
+                dropout=grid_input_value["dropout"],
+                kernel_size=grid_input_value["kernel_size"],
+                weight_decay=grid_input_value["weight_decay"],
+                use_mixup=args.use_mixup,
+                loss_function=grid_input_value["loss_function"],
+                label_smoothing=grid_input_value["loss_function_label_smoothing"],
+                focal_loss_alpha=string_to_float_list(grid_input_value["loss_function_focal_loss_alpha"]),
+                focal_loss_gamma=string_to_float_list(grid_input_value["loss_function_focal_loss_gamma"]),
+                progressive_training=args.progressive_training
+            )
+            summary_tarin_result.loc[grid_idx, "max_train_accuracy"] = max(train_history["train_acc"])
+            # 评估模型
+            if args.evaluate and args.test_annotation_file:
+                print("\n=== 评估流式模型 ===")
+                print(f"测试数据: {args.test_annotation_file}")
+                print(f"置信度阈值: {args.confidence_threshold}")
+
+                # 模型评估路径
+                eval_save_path = os.path.join(model_save_path, "streaming_eval_results.pkl")
+
+                # 流式评估
+                report_str, report_dict = evaluate_streaming_model(
+                    model=model,
+                    test_annotation_file=args.test_annotation_file,
+                    data_dir=args.data_dir,
+                    save_path=eval_save_path,
+                    device=DEVICE,
+                    confidence_threshold=args.confidence_threshold
+                )
+                accuracy  = report_dict["accuracy"]
+                f_res.write(f"accuracy: {accuracy:.4f}\n")
+                f_res.write(f"report:\n")
+                f_res.write(report_str)
+                f_res.close()
+                print(f"\n流式评估准确率: {accuracy:.4f}")
+                for key in report_dict:
+                    if type(report_dict[key]) == dict:
+                        for subkey in report_dict[key]:
+                            summary_tarin_result.loc[grid_idx, f"test_{key}_{subkey}"] = report_dict[key][subkey]
+                    else:
+                        summary_tarin_result.loc[grid_idx, f"test_{key}"] = report_dict[key]
+            print(f"流式Conformer模型训练完成！模型保存在:{local_model_path}")
+            print("导出ONNX模型...")
+            local_model_bas_path, local_model_ext_path = os.path.splitext(local_model_path)
+            cmd = ["python3", "export_onnx.py",
+                "--model_path", local_model_path,
+                "--model_type", "streaming",
+                "--onnx_save_path", local_model_bas_path + ".onnx"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            print(f"导出完成，模型保存在{local_model_bas_path}\n")
+        except KeyboardInterrupt:
+            # Ctrl+C 时会走到这里然后退出
+            print("检测到用户中断，程序退出！")
+            break  # 或用 exit()/sys.exit()
+        except Exception as e:
+            print(f"{module_name} fail \n {e}\n\n")
+            print(traceback.format_exc())
+            time.sleep(5)
+    summary_tarin_result.to_csv(os.path.join(summary_data_path, "train_test_result.csv"), index=False)
     print("\n训练和评估完成!")
 
 if __name__ == "__main__":

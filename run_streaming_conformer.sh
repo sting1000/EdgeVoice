@@ -12,11 +12,28 @@ VALID_ANNOTATION_FILE="data/split/val_annotations.csv"  # 验证数据标注文�
 TEST_ANNOTATION_FILE="data/split/test_annotations.csv"  # 测试数据标注文件
 DATA_DIR="data"  # 数据目录
 MODEL_SAVE_PATH="saved_models/streaming_conformer.pt"  # 模型保存路径
-NUM_EPOCHS=30  # 训练轮数，增加可能提高性能，但耗时更长
-BATCH_SIZE=16  # 批大小，减小可节省显存但训练更慢
-LEARNING_RATE=1e-4  # 学习率，影响收敛速度和最终性能
-WEIGHT_DECAY=0.001  # 权重衰减，防止过拟合
+
+NUM_EPOCHS=1  # 训练轮数，增加可能提高性能，但耗时更长
+BATCH_SIZE=128  # 批大小，减小可节省显存但训练更慢
 CONFIDENCE_THRESHOLD=0.8  # 流式评估的置信度阈值
+
+
+CONFORMER_LAYERS="8 10"
+LEARNING_RATE="3e-4"  # 学习率，影响收敛速度和最终性能 (支持grid search)
+DROPOUT="0.15"    # Dropout比例，防止过拟合(支持grid search)
+KERNEL_SIZE="11"     # 卷积核大小，影响感受野(支持grid search)
+WEIGHT_DECAY="0.002"  # 权重衰减，防止过拟合 (支持grid search)
+# Loss Function
+#  选择损失函数0(Cross Entrop),1(Label Smoothing), 2(Focal Loss) (支持grid search)
+LOSS_FUNCTION="2"
+# Label smoothing
+#  标签平滑强度，推荐范围：0.05-0.2 (支持grid search)
+LABEL_SMOOTHING="0.02"
+# Focal loss
+#  Focal loss 正负样本比例调节参数维度与函数output一致, 此处list需要以string形式输入 (支持grid search)
+FOCAL_LOSS_ALPHA="[1,0.1,1,1,1,1,1,1]"
+#  Focal loss 聚焦参数gamma维度与函数output一致, 此处list需要以string形式输入 (支持grid search)
+FOCAL_LOSS_GAMMA="[1,2.5,1,1,1,1,1,1]"
 
 # 显示核心配置
 echo "=====================================
@@ -27,7 +44,7 @@ echo "=====================================
 ======================================="
 
 # 设置环境变量优化性能
-export CUDA_VISIBLE_DEVICES=0  # 使用指定GPU
+export CUDA_VISIBLE_DEVICES=4,5,6,7  # 使用指定GPU
 export OMP_NUM_THREADS=8       # 优化OpenMP线程数
 export MKL_NUM_THREADS=8       # 优化MKL线程数
 
@@ -44,24 +61,16 @@ python train_streaming.py \
   --model_save_path $MODEL_SAVE_PATH \
   --num_epochs $NUM_EPOCHS \
   --batch_size $BATCH_SIZE \
+  --num_layers $CONFORMER_LAYERS \
   --learning_rate $LEARNING_RATE \
+  --dropout $DROPOUT \
+  --kernel_size $KERNEL_SIZE \
   --weight_decay $WEIGHT_DECAY \
   --use_mixup \
   --progressive_training \
   --evaluate \
-  --confidence_threshold $CONFIDENCE_THRESHOLD
-
-# 检查训练是否成功
-if [ $? -eq 0 ]; then
-    echo "流式Conformer模型训练完成！模型保存在: $MODEL_SAVE_PATH"
-    
-    # 导出ONNX模型（可选）
-    echo "导出ONNX模型..."
-    python export_onnx.py \
-      --model_path $MODEL_SAVE_PATH \
-      --model_type streaming \
-      --onnx_save_path "${MODEL_SAVE_PATH%.pt}.onnx"
-
-else
-    echo "训练失败，请检查错误信息"
-fi 
+  --confidence_threshold $CONFIDENCE_THRESHOLD \
+  --loss_function $LOSS_FUNCTION \
+  --label_smoothing $LABEL_SMOOTHING \
+  --focal_loss_alpha $FOCAL_LOSS_ALPHA \
+  --focal_loss_gamma $FOCAL_LOSS_GAMMA
