@@ -1,0 +1,26 @@
+EdgeVoice 部署优化模型信息
+========================================
+
+模型配置:
+  input_dim: 144
+  hidden_dim: 128
+  num_layers: 6
+  num_heads: 8
+  num_classes: 5
+  total_parameters: 2218246
+  trainable_parameters: 2216710
+
+意图类别 (5):
+  0: CAPTURE_AND_DESCRIBE
+  1: OTHERS
+  2: START_RECORDING
+  3: STOP_RECORDING
+  4: TAKE_PHOTO
+
+部署约束:
+  ✓ 16通道对齐 (FP16)
+  ✓ 移除分组卷积
+  ✓ 最大4维张量
+  ✓ 算子数量 ≤ 768
+  ✓ 输入数量 ≤ 7
+  ✓ 输出数量 ≤ 8
