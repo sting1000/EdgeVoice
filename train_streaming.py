@@ -184,12 +184,16 @@ def train_epoch(model, dataloader, optimizer, criterion, device=DEVICE,
         features = features.to(device)
         labels = labels.to(device)
         
+        # 转换为4维格式 [batch, 1, seq_len, features]
+        if features.dim() == 3:
+            features = features.unsqueeze(1)  # [batch, seq_len, features] -> [batch, 1, seq_len, features]
+        
         # 序列长度截断（渐进式训练）
-        if seq_length is not None and features.size(1) > seq_length:
+        if seq_length is not None and features.size(2) > seq_length:
             # 随机选择序列的开始位置，避免总是使用相同的部分
-            max_start = features.size(1) - seq_length
+            max_start = features.size(2) - seq_length
             start = random.randint(0, max_start) if max_start > 0 else 0
-            features = features[:, start:start+seq_length, :]
+            features = features[:, :, start:start+seq_length, :]
         
         
         # 清零梯度
@@ -256,10 +260,14 @@ def validate(model, dataloader, criterion, device=DEVICE, seq_length=None):
             features = features.to(device)
             labels = labels.to(device)
             
+            # 转换为4维格式 [batch, 1, seq_len, features]
+            if features.dim() == 3:
+                features = features.unsqueeze(1)  # [batch, seq_len, features] -> [batch, 1, seq_len, features]
+            
             # 序列长度截断
-            if seq_length is not None and features.size(1) > seq_length:
+            if seq_length is not None and features.size(2) > seq_length:
                 # 从序列开始处截断更合理
-                features = features[:, :seq_length, :]
+                features = features[:, :, :seq_length, :]
             
             # 前向传播
             outputs = model(features)
@@ -358,8 +366,9 @@ def evaluate_streaming_model(model, test_annotation_file, data_dir,
         
         # 模拟流式处理
         for chunk in chunk_features:
-            # 转换为张量并扩展批次维度
-            chunk_tensor = torch.FloatTensor(chunk).unsqueeze(0).to(device)
+            # 转换为4维张量 [batch, 1, seq_len, features]
+            # chunk 的形状是 [seq_len, features]，需要扩展为 [1, 1, seq_len, features]
+            chunk_tensor = torch.FloatTensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
             
             # 流式预测
             with torch.no_grad():
