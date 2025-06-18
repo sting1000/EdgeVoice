@@ -190,8 +190,15 @@ class MultiHeadAttention(nn.Module):
         else:
             updated_cache = None
         
-        # 计算注意力分数
-        attn_scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        # 计算注意力分数 - 使用4维矩阵乘法
+        # q: [batch_size, heads, seq_len, dim_head] -> [1, batch_size, heads, seq_len, dim_head]
+        # k: [batch_size, heads, seq_len, dim_head] -> [1, batch_size, heads, dim_head, seq_len]
+        q_4d = q.unsqueeze(0)  # [1, batch_size, heads, seq_len, dim_head]
+        k_4d = k.transpose(-1, -2).unsqueeze(0)  # [1, batch_size, heads, dim_head, seq_len]
+        
+        # 4维矩阵乘法
+        attn_scores_4d = torch.matmul(q_4d, k_4d)  # [1, batch_size, heads, seq_len, seq_len]
+        attn_scores = attn_scores_4d.squeeze(0) * self.scale  # [batch_size, heads, seq_len, seq_len]
         
         # 应用掩码(如果提供)
         if mask is not None:
@@ -202,8 +209,15 @@ class MultiHeadAttention(nn.Module):
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
         
-        # 应用注意力
-        out = torch.matmul(attn_weights, v)  # [batch_size, heads, seq_len, dim_head]
+        # 应用注意力 - 使用4维矩阵乘法
+        # attn_weights: [batch_size, heads, seq_len, seq_len] -> [1, batch_size, heads, seq_len, seq_len]
+        # v: [batch_size, heads, seq_len, dim_head] -> [1, batch_size, heads, seq_len, dim_head]
+        attn_weights_4d = attn_weights.unsqueeze(0)  # [1, batch_size, heads, seq_len, seq_len]
+        v_4d = v.unsqueeze(0)  # [1, batch_size, heads, seq_len, dim_head]
+        
+        # 4维矩阵乘法
+        out_4d = torch.matmul(attn_weights_4d, v_4d)  # [1, batch_size, heads, seq_len, dim_head]
+        out = out_4d.squeeze(0)  # [batch_size, heads, seq_len, dim_head]
         
         # 变换回原始形状 [batch_size, seq_len, inner_dim]
         out = out.permute(0, 2, 1, 3).contiguous().view(batch_size, seq_len, -1)
@@ -335,9 +349,18 @@ class AttentivePooling(nn.Module):
         attn_weights = self.attention(x)  # [batch_size, seq_len, 1]
         attn_weights = F.softmax(attn_weights, dim=1)
         
-        # 标准加权求和，更高效
-        weighted_sum = torch.bmm(attn_weights.transpose(1, 2), x)
-        return weighted_sum.squeeze(1)
+        # 使用4维矩阵乘法替代bmm
+        # attn_weights.transpose(1, 2): [batch_size, 1, seq_len] -> [1, batch_size, 1, seq_len]
+        # x: [batch_size, seq_len, dim] -> [1, batch_size, seq_len, dim]
+        attn_weights_t = attn_weights.transpose(1, 2)  # [batch_size, 1, seq_len]
+        attn_weights_4d = attn_weights_t.unsqueeze(0)  # [1, batch_size, 1, seq_len]
+        x_4d = x.unsqueeze(0)  # [1, batch_size, seq_len, dim]
+        
+        # 4维矩阵乘法
+        weighted_sum_4d = torch.matmul(attn_weights_4d, x_4d)  # [1, batch_size, 1, dim]
+        weighted_sum = weighted_sum_4d.squeeze(0).squeeze(1)  # [batch_size, dim]
+        
+        return weighted_sum
 
 class StreamingConformer(nn.Module):
     """优化的流式Conformer模型，减少参数量"""
