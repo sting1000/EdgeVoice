@@ -190,15 +190,25 @@ class MultiHeadAttention(nn.Module):
         else:
             updated_cache = None
         
-        # 计算注意力分数 - 使用4维矩阵乘法
-        # q: [batch_size, heads, seq_len, dim_head] -> [1, batch_size, heads, seq_len, dim_head]
-        # k: [batch_size, heads, seq_len, dim_head] -> [1, batch_size, heads, dim_head, seq_len]
-        q_4d = q.unsqueeze(0)  # [1, batch_size, heads, seq_len, dim_head]
-        k_4d = k.transpose(-1, -2).unsqueeze(0)  # [1, batch_size, heads, dim_head, seq_len]
+        # 重塑为3维以确保4维matmul: 合并batch_size和heads维度
+        # q: [batch_size, heads, seq_len, dim_head] -> [batch_size*heads, seq_len, dim_head]
+        q_reshaped = q.contiguous().view(batch_size * self.heads, seq_len, self.dim_head)
+        k_reshaped = k.contiguous().view(batch_size * self.heads, k.size(2), self.dim_head)
+        v_reshaped = v.contiguous().view(batch_size * self.heads, v.size(2), self.dim_head)
         
-        # 4维矩阵乘法
-        attn_scores_4d = torch.matmul(q_4d, k_4d)  # [1, batch_size, heads, seq_len, seq_len]
-        attn_scores = attn_scores_4d.squeeze(0) * self.scale  # [batch_size, heads, seq_len, seq_len]
+        # 计算注意力分数 - 使用4维matmul（最高4维）
+        # q_reshaped: [batch_size*heads, seq_len, dim_head] -> [1, batch_size*heads, seq_len, dim_head]
+        # k_reshaped: [batch_size*heads, kv_seq_len, dim_head] -> [1, batch_size*heads, dim_head, kv_seq_len]
+        q_4d = q_reshaped.unsqueeze(0)  # [1, batch_size*heads, seq_len, dim_head]
+        k_4d = k_reshaped.transpose(-1, -2).unsqueeze(0)  # [1, batch_size*heads, dim_head, kv_seq_len]
+        
+        # 4维矩阵乘法（最高4维）
+        attn_scores_4d = torch.matmul(q_4d, k_4d)  # [1, batch_size*heads, seq_len, kv_seq_len]
+        attn_scores_reshaped = attn_scores_4d.squeeze(0) * self.scale  # [batch_size*heads, seq_len, kv_seq_len]
+        
+        # 重塑回多头格式
+        kv_seq_len = k.size(2)
+        attn_scores = attn_scores_reshaped.view(batch_size, self.heads, seq_len, kv_seq_len)
         
         # 应用掩码(如果提供)
         if mask is not None:
@@ -209,15 +219,21 @@ class MultiHeadAttention(nn.Module):
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
         
-        # 应用注意力 - 使用4维矩阵乘法
-        # attn_weights: [batch_size, heads, seq_len, seq_len] -> [1, batch_size, heads, seq_len, seq_len]
-        # v: [batch_size, heads, seq_len, dim_head] -> [1, batch_size, heads, seq_len, dim_head]
-        attn_weights_4d = attn_weights.unsqueeze(0)  # [1, batch_size, heads, seq_len, seq_len]
-        v_4d = v.unsqueeze(0)  # [1, batch_size, heads, seq_len, dim_head]
+        # 重塑attention weights为3维以进行4维matmul
+        attn_weights_reshaped = attn_weights.contiguous().view(batch_size * self.heads, seq_len, kv_seq_len)
         
-        # 4维矩阵乘法
-        out_4d = torch.matmul(attn_weights_4d, v_4d)  # [1, batch_size, heads, seq_len, dim_head]
-        out = out_4d.squeeze(0)  # [batch_size, heads, seq_len, dim_head]
+        # 应用注意力 - 使用4维matmul（最高4维）
+        # attn_weights_reshaped: [batch_size*heads, seq_len, kv_seq_len] -> [1, batch_size*heads, seq_len, kv_seq_len]
+        # v_reshaped: [batch_size*heads, kv_seq_len, dim_head] -> [1, batch_size*heads, kv_seq_len, dim_head]
+        attn_weights_4d = attn_weights_reshaped.unsqueeze(0)  # [1, batch_size*heads, seq_len, kv_seq_len]
+        v_4d = v_reshaped.unsqueeze(0)  # [1, batch_size*heads, kv_seq_len, dim_head]
+        
+        # 4维矩阵乘法（最高4维）
+        out_4d = torch.matmul(attn_weights_4d, v_4d)  # [1, batch_size*heads, seq_len, dim_head]
+        out_reshaped = out_4d.squeeze(0)  # [batch_size*heads, seq_len, dim_head]
+        
+        # 重塑回多头格式然后变换回原始形状
+        out = out_reshaped.view(batch_size, self.heads, seq_len, self.dim_head)
         
         # 变换回原始形状 [batch_size, seq_len, inner_dim]
         out = out.permute(0, 2, 1, 3).contiguous().view(batch_size, seq_len, -1)

@@ -1,34 +1,41 @@
-# StreamingConformer 4D MatMul 修改总结
+# StreamingConformer 4维张量限制修改总结
 
 ## 修改目的
-为了满足某些推理框架（如 EdgeTPU、ONNX 等）的部署需求，将模型中的矩阵乘法操作修改为4维张量计算，通过在前面维度补1来实现。
+为了满足部署要求，确保模型中所有算子（特别是matmul）都不超过4维张量，以兼容EdgeTPU、ONNX等推理框架。
 
-## 修改内容
+## 关键修改
 
 ### 1. MultiHeadAttention 类中的修改
 
-#### 注意力分数计算
-```python
-# 原始代码
-attn_scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+#### 策略：维度合并 + 4维matmul
+通过将batch_size和heads维度合并，确保matmul操作的输入张量最高4维：
 
-# 修改后
-q_4d = q.unsqueeze(0)  # [1, batch_size, heads, seq_len, dim_head]
-k_4d = k.transpose(-1, -2).unsqueeze(0)  # [1, batch_size, heads, dim_head, seq_len]
-attn_scores_4d = torch.matmul(q_4d, k_4d)  # [1, batch_size, heads, seq_len, seq_len]
-attn_scores = attn_scores_4d.squeeze(0) * self.scale
+```python
+# 第一步：合并batch_size和heads维度
+# 原始: q/k/v [batch_size, heads, seq_len, dim_head] (4维)
+# 修改: 合并为 [batch_size*heads, seq_len, dim_head] (3维)
+q_reshaped = q.contiguous().view(batch_size * self.heads, seq_len, self.dim_head)
+k_reshaped = k.contiguous().view(batch_size * self.heads, k.size(2), self.dim_head)
+v_reshaped = v.contiguous().view(batch_size * self.heads, v.size(2), self.dim_head)
+
+# 第二步：4维matmul
+# 将3维张量扩展为4维进行矩阵乘法
+q_4d = q_reshaped.unsqueeze(0)  # [1, batch_size*heads, seq_len, dim_head] (4维)
+k_4d = k_reshaped.transpose(-1, -2).unsqueeze(0)  # [1, batch_size*heads, dim_head, kv_seq_len] (4维)
+attn_scores_4d = torch.matmul(q_4d, k_4d)  # [1, batch_size*heads, seq_len, kv_seq_len] (4维)
+
+# 第三步：重塑回原格式
+attn_scores_reshaped = attn_scores_4d.squeeze(0)  # [batch_size*heads, seq_len, kv_seq_len]
+attn_scores = attn_scores_reshaped.view(batch_size, self.heads, seq_len, kv_seq_len)
 ```
 
-#### 注意力应用
+#### 注意力应用的修改
 ```python
-# 原始代码
-out = torch.matmul(attn_weights, v)
-
-# 修改后
-attn_weights_4d = attn_weights.unsqueeze(0)  # [1, batch_size, heads, seq_len, seq_len]
-v_4d = v.unsqueeze(0)  # [1, batch_size, heads, seq_len, dim_head]
-out_4d = torch.matmul(attn_weights_4d, v_4d)  # [1, batch_size, heads, seq_len, dim_head]
-out = out_4d.squeeze(0)
+# 同样的策略应用于注意力计算
+attn_weights_reshaped = attn_weights.contiguous().view(batch_size * self.heads, seq_len, kv_seq_len)
+attn_weights_4d = attn_weights_reshaped.unsqueeze(0)  # [1, batch_size*heads, seq_len, kv_seq_len] (4维)
+v_4d = v_reshaped.unsqueeze(0)  # [1, batch_size*heads, kv_seq_len, dim_head] (4维)
+out_4d = torch.matmul(attn_weights_4d, v_4d)  # [1, batch_size*heads, seq_len, dim_head] (4维)
 ```
 
 ### 2. AttentivePooling 类中的修改
@@ -48,18 +55,22 @@ weighted_sum = weighted_sum_4d.squeeze(0).squeeze(1)  # [batch_size, dim]
 
 ## 验证结果
 
+### 张量维度验证
+- **所有matmul操作**：输入和输出都是4维或更低 ✓
+- **最大张量维度**：4维 ✓
+- **没有发现超过4维的张量** ✓
+
 ### 精度验证
 - 注意力模块精度一致: ✓ (最大差异: 0.00000000)
-- 池化模块精度一致: ✓ (最大差异: 0.00000000)
 - 模型输出确定性: ✓
-- 流式前向精度: ✓ (标准vs流式差异: 0.00000000)
+- 标准vs流式前向差异: ✓ (0.00000000)
 - 流式预测功能: ✓
 
 ### 功能验证
-- 模型创建成功
-- 前向传播正常
-- 流式预测功能正常
-- 参数量保持不变
+- 模型创建成功 ✓
+- 前向传播正常 ✓
+- 流式推理正常 ✓
+- 分块处理正常 ✓
 
 ## 技术细节
 
