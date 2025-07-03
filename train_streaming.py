@@ -493,7 +493,9 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
         num_heads=num_heads,
         dropout=dropout,
         kernel_size=kernel_size,
-        expansion_factor=expansion_factor
+        expansion_factor=expansion_factor,
+        use_padded_output=USE_PADDED_OUTPUT,
+        padded_output_dim=PADDED_OUTPUT_DIM
     )
     model = model.to(DEVICE)
     
@@ -630,6 +632,8 @@ def train_streaming_conformer(data_dir, annotation_file, model_save_path,
                     'dropout': dropout,
                     'kernel_size': kernel_size,
                     'expansion_factor': expansion_factor,
+                    'use_padded_output': USE_PADDED_OUTPUT,
+                    'padded_output_dim': PADDED_OUTPUT_DIM,
                     'model_type': 'streaming_conformer' # 添加模型类型标识
                 }
             }

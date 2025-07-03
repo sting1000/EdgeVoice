@@ -75,3 +75,7 @@ USE_COSINE_SCHEDULER = True  # 是否使用余弦学习率调度
 USE_EARLY_STOPPING = True  # 是否使用早停
 EARLY_STOPPING_PATIENCE = 8  # 早停耐心值，推荐范围：5-10
 PROGRESSIVE_TRAINING = True  # 是否使用渐进式长度训练
+
+# 部署优化参数
+USE_PADDED_OUTPUT = True  # 是否使用填充输出（16维）以满足部署平台要求
+PADDED_OUTPUT_DIM = 16  # 填充后的输出维度，必须是16的倍数

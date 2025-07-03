@@ -382,8 +382,14 @@ class StreamingConformer(nn.Module):
     """优化的流式Conformer模型，减少参数量"""
     def __init__(self, input_dim=48, hidden_dim=160, num_classes=4, 
                  num_layers=6, num_heads=8, dropout=0.1, 
-                 kernel_size=15, expansion_factor=4):
+                 kernel_size=15, expansion_factor=4, 
+                 use_padded_output=False, padded_output_dim=16):
         super().__init__()
+        
+        # 保存配置参数
+        self.num_classes = num_classes
+        self.use_padded_output = use_padded_output
+        self.padded_output_dim = padded_output_dim
         
         # 缩小hidden_dim，减少参数量
         hidden_dim = (hidden_dim // 16) * 16
@@ -423,19 +429,59 @@ class StreamingConformer(nn.Module):
         # 输出层 - 减少隐藏层大小
         classifier_hidden = hidden_dim // 2
         classifier_hidden = (classifier_hidden // 16) * 16  # 16通道对齐
+        
+        # 确定最终输出维度
+        final_output_dim = self.padded_output_dim if self.use_padded_output else num_classes
+        
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim, classifier_hidden),
             nn.LayerNorm(classifier_hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(classifier_hidden, num_classes)
+            nn.Linear(classifier_hidden, final_output_dim)
         )
+        
+        # 如果使用填充输出，需要特殊处理权重初始化
+        if self.use_padded_output and final_output_dim > num_classes:
+            with torch.no_grad():
+                # 将多余维度的权重和偏置设置为0，并且不参与梯度更新
+                last_layer = self.classifier[-1]
+                last_layer.weight.data[num_classes:, :] = 0.0
+                last_layer.bias.data[num_classes:] = 0.0
+                
+                # 冻结多余维度的参数
+                last_layer.weight.register_hook(
+                    lambda grad: self._mask_gradient(grad, num_classes)
+                )
+                last_layer.bias.register_hook(
+                    lambda grad: self._mask_bias_gradient(grad, num_classes)
+                )
         
         # 缓存用于流式推理
         self.reset_streaming_state()
         
         # 打印关键参数
         print(f"Conformer params: hidden_dim={hidden_dim}, dim_head={dim_head}, heads={num_heads}")
+        if self.use_padded_output:
+            print(f"使用填充输出: {final_output_dim}维 (有效维度: {num_classes})")
+    
+    def _mask_gradient(self, grad, num_classes):
+        """掩码权重梯度，确保多余维度不更新"""
+        if grad is not None:
+            grad[num_classes:, :] = 0.0
+        return grad
+    
+    def _mask_bias_gradient(self, grad, num_classes):
+        """掩码偏置梯度，确保多余维度不更新"""
+        if grad is not None:
+            grad[num_classes:] = 0.0
+        return grad
+    
+    def _process_padded_logits(self, logits):
+        """处理填充的logits，只返回有效维度"""
+        if self.use_padded_output:
+            return logits[:, :self.num_classes]
+        return logits
     
     def reset_streaming_state(self):
         """重置流式状态"""
@@ -517,7 +563,8 @@ class StreamingConformer(nn.Module):
         pooled = self.attention_pooling(x)
         
         # 分类
-        logits = self.classifier(pooled)
+        raw_logits = self.classifier(pooled)
+        logits = self._process_padded_logits(raw_logits)
         
         # 更新要缓存的特征
         if return_cache:
@@ -555,7 +602,8 @@ class StreamingConformer(nn.Module):
         pooled = self.attention_pooling(x)
         
         # 分类
-        logits = self.classifier(pooled)
+        raw_logits = self.classifier(pooled)
+        logits = self._process_padded_logits(raw_logits)
         
         return logits
     

@@ -56,7 +56,9 @@ def export_model_to_onnx(model_path, onnx_save_path=None, dynamic_axes=False):
             num_heads=model_config['num_heads'],
             dropout=model_config.get('dropout', 0.1), # 兼容旧模型
             kernel_size=model_config.get('kernel_size', 31), # 兼容旧模型
-            expansion_factor=model_config.get('expansion_factor', 4) # 兼容旧模型
+            expansion_factor=model_config.get('expansion_factor', 4), # 兼容旧模型
+            use_padded_output=model_config.get('use_padded_output', False), # 兼容旧模型
+            padded_output_dim=model_config.get('padded_output_dim', 16) # 兼容旧模型
         )
         
         # 创建新状态字典并调整参数
@@ -137,11 +139,18 @@ def export_model_to_onnx(model_path, onnx_save_path=None, dynamic_axes=False):
                 'output_logits': {0: 'batch_size'}
             }
         
+        # 确定实际输出维度
+        use_padded_output = model_config.get('use_padded_output', False)
+        padded_output_dim = model_config.get('padded_output_dim', 16)
+        actual_output_dim = padded_output_dim if use_padded_output else num_classes
+        
         # 导出核心模型逻辑（forward）
         if dynamic_axes:
             print(f"导出 StreamingConformer (动态形状 [batch_size, seq_length, {model_config['input_dim']}]) 到 {onnx_save_path}")
         else:
-            print(f"导出 StreamingConformer (固定形状 [1, {STREAMING_CHUNK_SIZE}, {model_config['input_dim']}] -> [1, {num_classes}]) 到 {onnx_save_path}")
+            print(f"导出 StreamingConformer (固定形状 [1, {STREAMING_CHUNK_SIZE}, {model_config['input_dim']}] -> [1, {actual_output_dim}]) 到 {onnx_save_path}")
+            if use_padded_output:
+                print(f"注意: 使用填充输出 {actual_output_dim}维，但只有前{num_classes}个维度有效")
         
         torch.onnx.export(
             model, 
