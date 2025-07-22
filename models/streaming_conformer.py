@@ -343,13 +343,14 @@ class ConformerConvolution(nn.Module):
         return x
 
 class AttentivePooling(nn.Module):
-    """简化的注意力池化层"""
+    """简化的注意力池化层，输出维度对齐32倍数以满足部署要求"""
     def __init__(self, dim):
         super().__init__()
+        # 将输出维度改为32以满足部署平台要求（32的倍数）
         self.attention = nn.Sequential(
             nn.Linear(dim, dim // 2),  # 减少中间维度
             nn.Tanh(),
-            nn.Linear(dim // 2, 1)
+            nn.Linear(dim // 2, 32)    # 从1改为32，满足32倍数要求
         )
         
     def forward(self, x):
@@ -362,7 +363,11 @@ class AttentivePooling(nn.Module):
             weighted_x: 池化后的特征 [batch_size, dim]
         """
         # 计算注意力权重
-        attn_weights = self.attention(x)  # [batch_size, seq_len, 1]
+        attn_logits = self.attention(x)  # [batch_size, seq_len, 32]
+        
+        # 对32个输出取平均，得到最终的注意力权重
+        # 这样在数学上等价于原来的单一输出，但满足部署要求
+        attn_weights = torch.mean(attn_logits, dim=-1, keepdim=True)  # [batch_size, seq_len, 1]
         attn_weights = F.softmax(attn_weights, dim=1)
         
         # 使用4维矩阵乘法替代bmm
