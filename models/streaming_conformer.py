@@ -349,8 +349,11 @@ class AttentivePooling(nn.Module):
         self.attention = nn.Sequential(
             nn.Linear(dim, dim // 2),  # 减少中间维度
             nn.Tanh(),
-            nn.Linear(dim // 2, 1)
+            nn.Linear(dim // 2, 32)  # 改为32维输出，避免64*1的matmul
         )
+        
+        # 添加压缩层将32维压缩为1维用于注意力计算
+        self.attention_compress = nn.Linear(32, 1)
         
     def forward(self, x):
         """应用注意力池化
@@ -361,8 +364,11 @@ class AttentivePooling(nn.Module):
         Returns:
             weighted_x: 池化后的特征 [batch_size, dim]
         """
-        # 计算注意力权重
-        attn_weights = self.attention(x)  # [batch_size, seq_len, 1]
+        # 计算32维注意力特征
+        attn_features = self.attention(x)  # [batch_size, seq_len, 32]
+        
+        # 压缩为1维用于注意力权重计算
+        attn_weights = self.attention_compress(attn_features)  # [batch_size, seq_len, 1]
         attn_weights = F.softmax(attn_weights, dim=1)
         
         # 使用4维矩阵乘法替代bmm
