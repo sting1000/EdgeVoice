@@ -3,6 +3,17 @@ import numpy as np
 import random
 from librosa.effects import time_stretch, pitch_shift
 import torch.nn.functional as F
+try:
+    import torchaudio.transforms as T
+    TORCHAUDIO_AVAILABLE = True
+except ImportError:
+    TORCHAUDIO_AVAILABLE = False
+    print("警告: torchaudio不可用，将使用简化的SpecAugment实现")
+
+from config import (
+    USE_SPECAUGMENT, SPECAUGMENT_PROB, FREQ_MASK_PARAM, TIME_MASK_PARAM,
+    NUM_FREQ_MASKS, NUM_TIME_MASKS, SPECAUGMENT_REPLACE_WITH_ZERO
+)
 
 def augment_streaming_features(features, phase='train'):
     """针对流式特征的增强策略
@@ -184,6 +195,136 @@ def add_gaussian_noise(features, mean=0, std=0.005):
     noise = torch.randn_like(features) * std + mean
     return features + noise
 
+class SpecAugmentTransform:
+    """SpecAugment变换类，使用torchaudio实现标准的SpecAugment
+    
+    适用于MFCC特征：虽然不是标准的频谱图，但SpecAugment仍然有效
+    - 频率掩码：遮蔽某些MFCC系数维度
+    - 时间掩码：遮蔽某些时间帧
+    """
+    
+    def __init__(self, 
+                 freq_mask_param=FREQ_MASK_PARAM,
+                 time_mask_param=TIME_MASK_PARAM,
+                 num_freq_masks=NUM_FREQ_MASKS,
+                 num_time_masks=NUM_TIME_MASKS,
+                 iid_masks=False,
+                 replace_with_zero=SPECAUGMENT_REPLACE_WITH_ZERO):
+        """
+        Args:
+            freq_mask_param: 频率掩码的最大宽度
+            time_mask_param: 时间掩码的最大宽度
+            num_freq_masks: 频率掩码数量
+            num_time_masks: 时间掩码数量
+            iid_masks: 是否为每个样本独立生成掩码
+            replace_with_zero: 是否用零填充掩码区域
+        """
+        self.freq_mask_param = freq_mask_param
+        self.time_mask_param = time_mask_param
+        self.num_freq_masks = num_freq_masks
+        self.num_time_masks = num_time_masks
+        self.iid_masks = iid_masks
+        self.replace_with_zero = replace_with_zero
+        
+        # 初始化torchaudio变换（如果可用）
+        if TORCHAUDIO_AVAILABLE:
+            self.freq_masking = T.FrequencyMasking(
+                freq_mask_param=freq_mask_param,
+                iid_masks=iid_masks
+            )
+            self.time_masking = T.TimeMasking(
+                time_mask_param=time_mask_param,
+                iid_masks=iid_masks
+            )
+    
+    def __call__(self, features):
+        """应用SpecAugment变换
+        
+        Args:
+            features: 输入特征 [batch_size, seq_len, feat_dim]
+            
+        Returns:
+            augmented_features: 增强后的特征，形状保持不变
+        """
+        if not isinstance(features, torch.Tensor):
+            features = torch.tensor(features, dtype=torch.float32)
+        
+        # 转换维度：从 [batch, time, freq] 到 [batch, freq, time]
+        # 这是torchaudio变换所需的格式
+        features_transposed = features.transpose(1, 2)  # [batch, feat_dim, seq_len]
+        
+        if TORCHAUDIO_AVAILABLE:
+            # 使用torchaudio实现
+            augmented = self._apply_torchaudio_specaugment(features_transposed)
+        else:
+            # 使用简化实现
+            augmented = self._apply_simple_specaugment(features_transposed)
+        
+        # 转换回原始维度：[batch, freq, time] -> [batch, time, freq]
+        augmented = augmented.transpose(1, 2)
+        
+        return augmented
+    
+    def _apply_torchaudio_specaugment(self, features):
+        """使用torchaudio实现SpecAugment"""
+        augmented = features.clone()
+        
+        # 应用频率掩码
+        for _ in range(self.num_freq_masks):
+            augmented = self.freq_masking(augmented)
+        
+        # 应用时间掩码
+        for _ in range(self.num_time_masks):
+            augmented = self.time_masking(augmented)
+        
+        return augmented
+    
+    def _apply_simple_specaugment(self, features):
+        """简化的SpecAugment实现（当torchaudio不可用时）"""
+        batch_size, feat_dim, seq_len = features.shape
+        augmented = features.clone()
+        
+        # 计算掩码填充值
+        if self.replace_with_zero:
+            mask_value = 0.0
+        else:
+            # 使用特征的均值
+            mask_value = features.mean()
+        
+        # 应用频率掩码
+        for _ in range(self.num_freq_masks):
+            for i in range(batch_size):
+                mask_width = random.randint(0, self.freq_mask_param)
+                if mask_width > 0 and feat_dim > mask_width:
+                    mask_start = random.randint(0, feat_dim - mask_width)
+                    augmented[i, mask_start:mask_start + mask_width, :] = mask_value
+        
+        # 应用时间掩码
+        for _ in range(self.num_time_masks):
+            for i in range(batch_size):
+                mask_width = random.randint(0, self.time_mask_param)
+                if mask_width > 0 and seq_len > mask_width:
+                    mask_start = random.randint(0, seq_len - mask_width)
+                    augmented[i, :, mask_start:mask_start + mask_width] = mask_value
+        
+        return augmented
+
+def apply_specaugment(features, prob=SPECAUGMENT_PROB):
+    """应用SpecAugment增强
+    
+    Args:
+        features: 特征张量 [batch_size, seq_len, feat_dim]
+        prob: 应用SpecAugment的概率
+        
+    Returns:
+        augmented_features: 增强后的特征
+    """
+    if not USE_SPECAUGMENT or random.random() > prob:
+        return features
+    
+    specaugment = SpecAugmentTransform()
+    return specaugment(features)
+
 def time_warp(features, max_warp=5):
     """时间扭曲增强
     
@@ -249,17 +390,22 @@ def apply_augmentations(features, phase='train', augment_prob=0.7):
     if phase != 'train' or random.random() > augment_prob:
         return features
     
-    # 应用随机增强组合
-    if random.random() < 0.5:
+    # 1. 优先应用SpecAugment（更标准的增强方法）
+    if USE_SPECAUGMENT and random.random() < SPECAUGMENT_PROB:
+        features = apply_specaugment(features, prob=1.0)  # 已经通过概率检查
+    else:
+        # 2. 回退到传统增强方法（与SpecAugment二选一，避免过度增强）
+        if random.random() < 0.3:
+            features = time_mask(features, max_mask_len=random.randint(1, 5))
+        
+        if random.random() < 0.3:
+            features = freq_mask(features, max_mask_len=random.randint(1, 3))
+    
+    # 3. 其他增强方法（可以与SpecAugment组合使用）
+    if random.random() < 0.4:  # 降低噪声概率，避免过度增强
         features = add_gaussian_noise(features, std=random.uniform(0.001, 0.005))
     
-    if random.random() < 0.3:
-        features = time_mask(features, max_mask_len=random.randint(1, 5))
-    
-    if random.random() < 0.3:
-        features = freq_mask(features, max_mask_len=random.randint(1, 3))
-    
-    if random.random() < 0.2:
+    if random.random() < 0.15:  # 降低时间扭曲概率
         features = time_warp(features, max_warp=random.randint(2, 4))
     
     return features 

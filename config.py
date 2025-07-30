@@ -68,6 +68,15 @@ MIXUP_ALPHA = 0.2   # MixUp增强强度，影响混合程度，推荐范围：0.
 NOISE_STD = 0.01    # 高斯噪声标准差，建议范围：0.001-0.02
 USE_MIXUP = True    # 是否使用MixUp增强
 
+# SpecAugment参数
+USE_SPECAUGMENT = True  # 是否使用SpecAugment增强
+SPECAUGMENT_PROB = 0.6  # SpecAugment应用概率，推荐范围：0.4-0.8
+FREQ_MASK_PARAM = 10    # 频率掩码最大宽度，推荐范围：8-15（约10%的特征维度）
+TIME_MASK_PARAM = 20    # 时间掩码最大宽度，推荐范围：15-30（约10-15%的时间序列）
+NUM_FREQ_MASKS = 2      # 频率掩码数量，推荐范围：1-3
+NUM_TIME_MASKS = 2      # 时间掩码数量，推荐范围：1-3
+SPECAUGMENT_REPLACE_WITH_ZERO = False  # 是否用零填充掩码区域（False使用均值）
+
 # 训练策略参数
 USE_LABEL_SMOOTHING = True  # 是否使用标签平滑
 LABEL_SMOOTHING = 0.15  # 标签平滑强度，推荐范围：0.05-0.2
